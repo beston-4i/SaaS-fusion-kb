@@ -1,0 +1,71 @@
+# HR Repository Patterns
+
+**Purpose:** Standardized CTEs for extracting Core HR data.
+**Critical Rule:** All `_F` tables MUST have date filters.
+
+---
+
+## 1. Worker Master Repository
+*Retrieves active people with names and emails.*
+
+```sql
+HR_WORKER_MASTER AS (
+    SELECT /*+ qb_name(HR_WORKER) MATERIALIZE PARALLEL(2) */
+           PAPF.PERSON_ID
+          ,PAPF.PERSON_NUMBER
+          ,PNAME.FULL_NAME
+          ,PEMAIL.EMAIL_ADDRESS
+          ,PPOS.ORIGINAL_DATE_OF_HIRE
+    FROM   PER_ALL_PEOPLE_F PAPF
+          ,PER_PERSON_NAMES_F PNAME
+          ,PER_EMAIL_ADDRESSES PEMAIL
+          ,PER_PERIODS_OF_SERVICE PPOS
+    WHERE  TRUNC(SYSDATE) BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
+      AND  TRUNC(SYSDATE) BETWEEN PNAME.EFFECTIVE_START_DATE AND PNAME.EFFECTIVE_END_DATE
+      AND  PNAME.NAME_TYPE = 'GLOBAL'
+      AND  PAPF.PERSON_ID = PNAME.PERSON_ID
+      AND  PAPF.PERSON_ID = PEMAIL.PERSON_ID(+) -- Email is optional
+      AND  PEMAIL.EMAIL_TYPE(+) = 'W1'
+      AND  PAPF.PERSON_ID = PPOS.PERSON_ID
+      AND  PPOS.DATE_START = (SELECT MAX(DATE_START) FROM PER_PERIODS_OF_SERVICE WHERE PERSON_ID = PAPF.PERSON_ID)
+)
+```
+
+---
+
+## 2. Assignment Master
+*Retrieves current active primary assignment details (Job, Dept, Loc).*
+
+```sql
+HR_ASG_MASTER AS (
+    SELECT /*+ qb_name(HR_ASG) MATERIALIZE */
+           PAAM.ASSIGNMENT_ID
+          ,PAAM.PERSON_ID
+          ,PAAM.JOB_ID
+          ,PAAM.ORGANIZATION_ID
+          ,PAAM.LOCATION_ID
+          ,PAAM.ASSIGNMENT_STATUS_TYPE
+          ,PAAM.ASSIGNMENT_NUMBER
+    FROM   PER_ALL_ASSIGNMENTS_M PAAM
+    WHERE  TRUNC(SYSDATE) BETWEEN PAAM.EFFECTIVE_START_DATE AND PAAM.EFFECTIVE_END_DATE
+      AND  PAAM.EFFECTIVE_LATEST_CHANGE = 'Y'
+      AND  PAAM.ASSIGNMENT_TYPE IN ('E', 'C') -- Employee, Contingent
+      AND  PAAM.PRIMARY_FLAG = 'Y'
+      AND  PAAM.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+)
+```
+
+---
+
+## 3. Location & Department lookup
+*Standard lookup for Job and Org names.*
+
+```sql
+HR_ORG_MASTER AS (
+    SELECT /*+ qb_name(HR_ORG) MATERIALIZE */
+           HAOU.ORGANIZATION_ID
+          ,HAOU.NAME AS DEPT_NAME
+    FROM   HR_ALL_ORGANIZATION_UNITS_F HAOU
+    WHERE  TRUNC(SYSDATE) BETWEEN HAOU.EFFECTIVE_START_DATE AND HAOU.EFFECTIVE_END_DATE
+)
+```
