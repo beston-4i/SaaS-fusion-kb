@@ -452,7 +452,461 @@ ORDER BY PAPF.PERSON_NUMBER, ABT.ABSENCE_TYPE
 
 ---
 
-**Last Updated:** 18-Dec-2025  
+**Last Updated:** 13-Jan-2026  
 **Status:** Production-Ready  
-**Source:** Employee Timesheet Report (980 lines analyzed)
+**Source:** Employee Timesheet Report (980 lines analyzed) + OTL Production Queries (10 files)
+
+---
+
+## 5. 🚀 OTL Attendance & Shift Templates (07-Jan-2026)
+
+### 5.1 Basic Attendance Report Template
+
+**Purpose:** Daily present/absent status with punch times  
+**Use Case:** Daily attendance monitoring
+
+```sql
+/*
+TITLE: Basic Attendance Report (OTL)
+PURPOSE: Show daily present/absent status with punch times
+AUTHOR: AI Assistant
+DATE: 07-Jan-2026
+*/
+
+WITH PERSON_DETAILS AS (
+    SELECT
+        PAPF.PERSON_ID,
+        PAPF.PERSON_NUMBER,
+        PPNF.DISPLAY_NAME,
+        PAAF.ASSIGNMENT_ID,
+        PSA.SCHEDULE_ID,
+        PSA.START_DATE,
+        PSA.END_DATE
+    FROM
+        PER_ALL_PEOPLE_F PAPF,
+        PER_PERSON_NAMES_F PPNF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_SCHEDULE_ASSIGNMENTS PSA
+    WHERE
+        PAPF.PERSON_ID = PPNF.PERSON_ID
+        AND PAPF.PERSON_ID = PAAF.PERSON_ID
+        AND PAAF.ASSIGNMENT_ID = PSA.RESOURCE_ID
+        AND PSA.RESOURCE_TYPE = 'ASSIGN'
+        AND PSA.PRIMARY_FLAG = 'Y'
+        AND PPNF.NAME_TYPE = 'GLOBAL'
+        AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+        AND PAAF.ASSIGNMENT_TYPE = 'E'
+        AND PAAF.PRIMARY_ASSIGNMENT_FLAG = 'Y'
+        AND TRUNC(SYSDATE) BETWEEN TRUNC(PAPF.EFFECTIVE_START_DATE) AND TRUNC(PAPF.EFFECTIVE_END_DATE)
+        AND TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+        AND TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) AND TRUNC(PAAF.EFFECTIVE_END_DATE)
+)
+SELECT
+    PER.PERSON_NUMBER,
+    PER.DISPLAY_NAME,
+    TRUNC(HTREV.TE_START_TIME) ATTENDANCE_DATE,
+    TO_CHAR(HTREV.TE_START_TIME, 'HH24:MI') PUNCH_IN,
+    TO_CHAR(HTREV.TE_STOP_TIME, 'HH24:MI') PUNCH_OUT,
+    ROUND(HTREV.TE_MEASURE, 2) WORK_HOURS,
+    HTDTUSV.STATUS_VALUE STATUS,
+    CASE
+        WHEN HTREV.TE_START_TIME IS NOT NULL AND HTREV.TE_STOP_TIME IS NOT NULL THEN 'Present'
+        WHEN HTREV.TE_START_TIME IS NULL THEN 'Missing IN'
+        WHEN HTREV.TE_STOP_TIME IS NULL THEN 'Missing OUT'
+    END REMARKS
+FROM
+    PERSON_DETAILS PER,
+    HWM_TM_RPT_ENTRY_V HTREV,
+    HWM_TM_D_TM_UI_STATUS_V HTDTUSV
+WHERE
+    PER.ASSIGNMENT_ID = HTREV.TE_SUBRESOURCE_ID
+    AND HTREV.TC_TM_REC_GRP_ID = HTDTUSV.TM_BLDG_BLK_ID
+    AND HTREV.TE_LATEST_VERSION = 'Y'
+    AND HTREV.TE_DELETE_FLAG IS NULL
+    AND HTREV.TE_LAYER_CODE = 'TIME_RPTD'
+    
+    -- CRITICAL: Get latest punch for the day
+    AND HTREV.TE_CREATION_DATE = (
+        SELECT MAX(TE_CREATION_DATE)
+        FROM HWM_TM_RPT_ENTRY_V
+        WHERE DAY_TM_REC_GRP_ID = HTREV.DAY_TM_REC_GRP_ID
+        AND RESOURCE_ID = HTREV.RESOURCE_ID
+        AND TE_LAYER_CODE = 'TIME_RPTD'
+        AND TE_DELETE_FLAG IS NULL
+    )
+    
+    AND TRUNC(HTREV.TE_START_TIME) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+    
+ORDER BY PER.PERSON_NUMBER, TRUNC(HTREV.TE_START_TIME);
+```
+
+**Parameters:**
+- `:P_FROM_DATE` - Start date
+- `:P_TO_DATE` - End date
+
+---
+
+### 5.2 Monthly Attendance Summary Template
+
+**Purpose:** Total scheduled days, worked days, absent days, hours worked  
+**Use Case:** Monthly attendance compliance, HR reporting
+
+```sql
+/*
+TITLE: Monthly Attendance Summary (OTL)
+PURPOSE: Show total scheduled days, worked days, absent days, hours
+AUTHOR: AI Assistant
+DATE: 07-Jan-2026
+*/
+
+WITH PERSON_DETAILS AS (
+    -- Same as Template 5.1
+),
+SCHEDULED_DAYS AS (
+    SELECT
+        PER.PERSON_ID,
+        COUNT(DISTINCT TRUNC(ZSSTD.START_DATE_TIME)) TOTAL_SCHEDULED_DAYS,
+        SUM(ZSSV.DURATION_MS_NUM / 3600000) TOTAL_SCHEDULED_HOURS
+    FROM
+        PERSON_DETAILS PER,
+        ZMM_SR_SCHEDULE_DTLS ZSSTD,
+        ZMM_SR_SHIFTS_VL ZSSV
+    WHERE
+        PER.SCHEDULE_ID = ZSSTD.SCHEDULE_ID
+        AND ZSSTD.SHIFT_ID = ZSSV.SHIFT_ID
+        AND TRUNC(ZSSTD.START_DATE_TIME) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+        AND TRUNC(ZSSTD.START_DATE_TIME) BETWEEN TRUNC(PER.START_DATE) AND TRUNC(PER.END_DATE)
+    GROUP BY PER.PERSON_ID
+),
+WORKED_DAYS AS (
+    SELECT
+        HTREV.RESOURCE_ID PERSON_ID,
+        COUNT(DISTINCT TRUNC(HTREV.DAY_START_TIME)) TOTAL_WORKED_DAYS,
+        ROUND(SUM(HTREV.TE_MEASURE), 2) TOTAL_WORKED_HOURS
+    FROM
+        HWM_TM_RPT_ENTRY_V HTREV
+    WHERE
+        HTREV.TE_LATEST_VERSION = 'Y'
+        AND HTREV.TE_DELETE_FLAG IS NULL
+        AND HTREV.TE_LAYER_CODE = 'TIME_RPTD'
+        AND TRUNC(HTREV.DAY_START_TIME) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+        
+        -- Exclude missing punches
+        AND (TO_CHAR(HTREV.TE_START_TIME, 'HH24') <> '00' OR TO_CHAR(HTREV.TE_START_TIME, 'MI') <> '00')
+        AND (TO_CHAR(HTREV.TE_STOP_TIME, 'HH24') <> '00' OR TO_CHAR(HTREV.TE_STOP_TIME, 'MI') <> '00')
+        
+        AND HTREV.TE_CREATION_DATE = (
+            SELECT MAX(TE_CREATION_DATE)
+            FROM HWM_TM_RPT_ENTRY_V
+            WHERE DAY_TM_REC_GRP_ID = HTREV.DAY_TM_REC_GRP_ID
+            AND RESOURCE_ID = HTREV.RESOURCE_ID
+            AND TE_LAYER_CODE = 'TIME_RPTD'
+            AND TE_DELETE_FLAG IS NULL
+        )
+    GROUP BY HTREV.RESOURCE_ID
+),
+WEEKOFF_DAYS AS (
+    SELECT
+        PER.PERSON_ID,
+        COUNT(ZSAD.CALENDAR_DATE) WEEKOFF_COUNT
+    FROM
+        PERSON_DETAILS PER,
+        ZMM_SR_AVAILABLE_DATES ZSAD
+    WHERE
+        PER.SCHEDULE_ID = ZSAD.SCHEDULE_ID
+        AND ZSAD.SEQ_NUM IS NULL
+        AND ZSAD.CALENDAR_DATE BETWEEN :P_FROM_DATE AND :P_TO_DATE
+        AND ZSAD.CALENDAR_DATE BETWEEN TRUNC(PER.START_DATE) AND TRUNC(PER.END_DATE)
+    GROUP BY PER.PERSON_ID
+),
+LEAVE_DAYS AS (
+    SELECT
+        APAE.PERSON_ID,
+        COUNT(DISTINCT CAL.CALENDAR_DATE) LEAVE_COUNT
+    FROM
+        ANC_PER_ABS_ENTRIES APAE,
+        (SELECT :P_FROM_DATE + ROWNUM - 1 CALENDAR_DATE
+         FROM DUAL
+         CONNECT BY ROWNUM <= :P_TO_DATE - :P_FROM_DATE + 1) CAL
+    WHERE
+        APAE.APPROVAL_STATUS_CD = 'APPROVED'
+        AND APAE.ABSENCE_STATUS_CD <> 'ORA_WITHDRAWN'
+        AND TRUNC(CAL.CALENDAR_DATE) BETWEEN TRUNC(APAE.START_DATE) AND TRUNC(APAE.END_DATE)
+    GROUP BY APAE.PERSON_ID
+)
+SELECT
+    PER.PERSON_NUMBER,
+    PER.DISPLAY_NAME,
+    NVL(SD.TOTAL_SCHEDULED_DAYS, 0) TOTAL_SCHEDULED_DAYS,
+    NVL(SD.TOTAL_SCHEDULED_HOURS, 0) TOTAL_SCHEDULED_HOURS,
+    NVL(WD.TOTAL_WORKED_DAYS, 0) TOTAL_WORKED_DAYS,
+    NVL(WD.TOTAL_WORKED_HOURS, 0) TOTAL_WORKED_HOURS,
+    NVL(WO.WEEKOFF_COUNT, 0) WEEKOFF_DAYS,
+    NVL(LD.LEAVE_COUNT, 0) LEAVE_DAYS,
+    (SD.TOTAL_SCHEDULED_DAYS - NVL(WO.WEEKOFF_COUNT, 0) - NVL(WD.TOTAL_WORKED_DAYS, 0) - NVL(LD.LEAVE_COUNT, 0)) ABSENT_DAYS,
+    ROUND((NVL(WD.TOTAL_WORKED_DAYS, 0) / NULLIF(SD.TOTAL_SCHEDULED_DAYS - NVL(WO.WEEKOFF_COUNT, 0), 0)) * 100, 2) ATTENDANCE_PCT
+FROM
+    PERSON_DETAILS PER
+    LEFT JOIN SCHEDULED_DAYS SD ON PER.PERSON_ID = SD.PERSON_ID
+    LEFT JOIN WORKED_DAYS WD ON PER.PERSON_ID = WD.PERSON_ID
+    LEFT JOIN WEEKOFF_DAYS WO ON PER.PERSON_ID = WO.PERSON_ID
+    LEFT JOIN LEAVE_DAYS LD ON PER.PERSON_ID = LD.PERSON_ID
+ORDER BY PER.PERSON_NUMBER;
+```
+
+**Parameters:**
+- `:P_FROM_DATE` - Start date (e.g., '01-JAN-2026')
+- `:P_TO_DATE` - End date (e.g., '31-JAN-2026')
+
+---
+
+### 5.3 Shift Allowance Calculation Template
+
+**Purpose:** Identify night/evening shift days eligible for allowance  
+**Use Case:** Payroll processing, shift allowance calculation
+
+```sql
+/*
+TITLE: Shift Allowance Calculation (OTL)
+PURPOSE: Identify night/evening shift days eligible for allowance
+AUTHOR: AI Assistant
+DATE: 07-Jan-2026
+*/
+
+WITH PERSON_DETAILS AS (
+    -- Same as Template 5.1
+),
+SHIFT_ELIGIBILITY AS (
+    SELECT
+        PER.PERSON_ID,
+        PER.PERSON_NUMBER,
+        PER.DISPLAY_NAME,
+        TRUNC(HTREV.TE_START_TIME) CALENDAR_DATE,
+        HTREV.TE_MEASURE WORK_HRS,
+        HTREV.TE_START_TIME PUNCH_IN,
+        HTREV.TE_STOP_TIME PUNCH_OUT,
+        HTDTUSV.STATUS_VALUE,
+        
+        ZSSV.DURATION_MS_NUM / 3600000 SHIFT_DURATION,
+        
+        -- Build shift start/end datetime
+        CASE
+            WHEN ZSSV.START_TIME_MS_NUM / 3600000 >= 24
+            THEN TO_DATE(TO_CHAR(TRUNC(HTREV.TE_START_TIME) + 1, 'YYYY-MM-DD') || ' ' ||
+                        LPAD(TRUNC(ZSSV.START_TIME_MS_NUM / 3600000) - 24, 2, '0') || ':' ||
+                        LPAD(TRUNC(MOD(ROUND(ZSSV.START_TIME_MS_NUM / 1000), 3600) / 60), 2, '0'),
+                        'YYYY-MM-DD HH24:MI')
+            ELSE TO_DATE(TO_CHAR(TRUNC(HTREV.TE_START_TIME), 'YYYY-MM-DD') || ' ' ||
+                        LPAD(TRUNC(ZSSV.START_TIME_MS_NUM / 3600000), 2, '0') || ':' ||
+                        LPAD(TRUNC(MOD(ROUND(ZSSV.START_TIME_MS_NUM / 1000), 3600) / 60), 2, '0'),
+                        'YYYY-MM-DD HH24:MI')
+        END START_DATE_TIME,
+        
+        CASE
+            WHEN ZSSV.END_TIME_MS_NUM / 3600000 >= 24
+            THEN TO_DATE(TO_CHAR(TRUNC(HTREV.TE_START_TIME) + 1, 'YYYY-MM-DD') || ' ' ||
+                        LPAD(TRUNC(ZSSV.END_TIME_MS_NUM / 3600000) - 24, 2, '0') || ':' ||
+                        LPAD(TRUNC(MOD(ROUND(ZSSV.END_TIME_MS_NUM / 1000), 3600) / 60), 2, '0'),
+                        'YYYY-MM-DD HH24:MI')
+            ELSE TO_DATE(TO_CHAR(TRUNC(HTREV.TE_START_TIME), 'YYYY-MM-DD') || ' ' ||
+                        LPAD(TRUNC(ZSSV.END_TIME_MS_NUM / 3600000), 2, '0') || ':' ||
+                        LPAD(TRUNC(MOD(ROUND(ZSSV.END_TIME_MS_NUM / 1000), 3600) / 60), 2, '0'),
+                        'YYYY-MM-DD HH24:MI')
+        END END_DATE_TIME,
+        
+        -- Classify shift type
+        CASE
+            WHEN ZSSV.START_TIME_MS_NUM / 3600000 BETWEEN 18 AND 28
+             OR ZSSV.START_TIME_MS_NUM / 3600000 BETWEEN 0 AND 4
+            THEN 'night shift'
+            WHEN ZSSV.START_TIME_MS_NUM / 3600000 BETWEEN 13 AND 17.5
+            THEN 'Evening Shift'
+            ELSE 'Regular'
+        END SHIFT_TYPE
+        
+    FROM
+        PERSON_DETAILS PER,
+        HWM_TM_RPT_ENTRY_V HTREV,
+        HWM_TM_D_TM_UI_STATUS_V HTDTUSV,
+        ZMM_SR_SCHEDULES_VL ZSSS,
+        ZMM_SR_SCHEDULE_PATTERNS ZSSP,
+        ZMM_SR_PATTERN_DTLS ZSPD,
+        ZMM_SR_SCHEDULE_DTLS ZSSTD,
+        ZMM_SR_SHIFTS_VL ZSSV
+    WHERE
+        PER.ASSIGNMENT_ID = HTREV.TE_SUBRESOURCE_ID
+        AND HTREV.TC_TM_REC_GRP_ID = HTDTUSV.TM_BLDG_BLK_ID
+        AND PER.SCHEDULE_ID = ZSSS.SCHEDULE_ID
+        AND ZSSS.SCHEDULE_ID = ZSSP.SCHEDULE_ID
+        AND ZSSP.PATTERN_ID = ZSPD.PATTERN_ID
+        AND ZSPD.CHILD_SHIFT_ID = ZSSV.SHIFT_ID
+        AND ZSSS.SCHEDULE_ID = ZSSTD.SCHEDULE_ID
+        AND ZSSV.SHIFT_ID = ZSSTD.SHIFT_ID
+        AND HTREV.TE_LATEST_VERSION = 'Y'
+        AND HTREV.TE_DELETE_FLAG IS NULL
+        AND HTREV.TE_LAYER_CODE = 'TIME_RPTD'
+        AND TRUNC(HTREV.TE_START_TIME) = TRUNC(ZSSTD.START_DATE_TIME)
+        AND TRUNC(HTREV.TE_START_TIME) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+        AND HTREV.TE_CREATION_DATE = (
+            SELECT MAX(TE_CREATION_DATE)
+            FROM HWM_TM_RPT_ENTRY_V
+            WHERE DAY_TM_REC_GRP_ID = HTREV.DAY_TM_REC_GRP_ID
+            AND RESOURCE_ID = HTREV.RESOURCE_ID
+            AND TE_LAYER_CODE = 'TIME_RPTD'
+            AND TE_DELETE_FLAG IS NULL
+        )
+)
+SELECT
+    PERSON_NUMBER,
+    DISPLAY_NAME,
+    CALENDAR_DATE,
+    SHIFT_TYPE,
+    WORK_HRS,
+    SHIFT_DURATION,
+    
+    -- Eligibility check
+    CASE
+        WHEN SHIFT_TYPE IN ('night shift', 'Evening Shift')
+         AND SHIFT_DURATION <= WORK_HRS
+         AND PUNCH_IN <= START_DATE_TIME
+         AND PUNCH_OUT >= END_DATE_TIME
+         AND STATUS_VALUE = 'APPROVED'
+        THEN 'Y'
+        ELSE 'N'
+    END ELIGIBLE,
+    
+    STATUS_VALUE
+    
+FROM SHIFT_ELIGIBILITY
+WHERE SHIFT_TYPE IN ('night shift', 'Evening Shift')
+ORDER BY PERSON_NUMBER, CALENDAR_DATE;
+```
+
+**Parameters:**
+- `:P_FROM_DATE` - Start date
+- `:P_TO_DATE` - End date
+
+**Business Rules:**
+- Night Shift: 18:00-04:00 (6 PM to 4 AM)
+- Evening Shift: 13:00-17:30 (1 PM to 5:30 PM)
+- Must work FULL shift duration
+- Must punch in/out on time
+- Must be APPROVED
+
+---
+
+### 5.4 Missing Punch Report Template
+
+**Purpose:** Identify missing punch IN or OUT  
+**Use Case:** Daily exception monitoring, compliance tracking
+
+```sql
+/*
+TITLE: Missing Punch Report (OTL)
+PURPOSE: Identify missing punch IN or OUT
+AUTHOR: AI Assistant
+DATE: 07-Jan-2026
+*/
+
+SELECT
+    PAPF.PERSON_NUMBER,
+    PPNF.DISPLAY_NAME,
+    TRUNC(HTREV.TE_START_TIME) PUNCH_DATE,
+    
+    -- Detect missing IN
+    CASE
+        WHEN EXTRACT(HOUR FROM HTREV.TE_START_TIME) = 0
+         AND EXTRACT(MINUTE FROM HTREV.TE_START_TIME) = 0
+         AND EXTRACT(SECOND FROM HTREV.TE_START_TIME) = 0
+        THEN 'NOT AVAILABLE'
+        ELSE TO_CHAR(HTREV.TE_START_TIME, 'HH24:MI')
+    END PUNCH_IN,
+    
+    -- Detect missing OUT
+    CASE
+        WHEN TRUNC(HTREV.TE_STOP_TIME) IS NULL
+        THEN 'NOT AVAILABLE'
+        ELSE TO_CHAR(HTREV.TE_STOP_TIME, 'HH24:MI')
+    END PUNCH_OUT,
+    
+    HTDTUSV.STATUS_VALUE,
+    
+    -- Remark
+    CASE
+        WHEN PUNCH_IN = 'NOT AVAILABLE' THEN 'Missing IN'
+        WHEN PUNCH_OUT = 'NOT AVAILABLE' THEN 'Missing OUT'
+    END REMARKS
+    
+FROM
+    PER_ALL_PEOPLE_F PAPF,
+    PER_PERSON_NAMES_F PPNF,
+    PER_ALL_ASSIGNMENTS_F PAAF,
+    HWM_TM_RPT_ENTRY_V HTREV,
+    HWM_TM_D_TM_UI_STATUS_V HTDTUSV
+WHERE
+    PAPF.PERSON_ID = PPNF.PERSON_ID
+    AND PAPF.PERSON_ID = PAAF.PERSON_ID
+    AND PAAF.ASSIGNMENT_ID = HTREV.TE_SUBRESOURCE_ID
+    AND HTREV.TC_TM_REC_GRP_ID = HTDTUSV.TM_BLDG_BLK_ID
+    AND HTREV.TE_LATEST_VERSION = 'Y'
+    AND HTREV.TE_DELETE_FLAG IS NULL
+    AND PPNF.NAME_TYPE = 'GLOBAL'
+    AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+    
+    -- Filter for missing punches
+    AND (TRUNC(HTREV.TE_STOP_TIME) IS NULL
+         OR (EXTRACT(HOUR FROM HTREV.TE_START_TIME) = 0
+             AND EXTRACT(MINUTE FROM HTREV.TE_START_TIME) = 0
+             AND EXTRACT(SECOND FROM HTREV.TE_START_TIME) = 0))
+    
+    -- Status indicates incomplete
+    AND HTDTUSV.STATUS_VALUE IN ('INCOMPLETE', 'IN_ERROR')
+    
+    AND TRUNC(HTREV.TE_START_TIME) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+    
+    -- Latest version for the day
+    AND HTREV.TE_CREATION_DATE = (
+        SELECT MAX(TE_CREATION_DATE)
+        FROM HWM_TM_RPT_ENTRY_V
+        WHERE DAY_TM_REC_GRP_ID = HTREV.DAY_TM_REC_GRP_ID
+        AND RESOURCE_ID = HTREV.RESOURCE_ID
+        AND TE_DELETE_FLAG IS NULL
+    )
+    
+    AND TRUNC(SYSDATE) BETWEEN TRUNC(PAPF.EFFECTIVE_START_DATE) AND TRUNC(PAPF.EFFECTIVE_END_DATE)
+    AND TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+    AND TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) AND TRUNC(PAAF.EFFECTIVE_END_DATE)
+    
+ORDER BY PAPF.PERSON_NUMBER, TRUNC(HTREV.TE_START_TIME);
+```
+
+**Parameters:**
+- `:P_FROM_DATE` - Start date
+- `:P_TO_DATE` - End date
+
+---
+
+## 6. 📚 Additional Template Resources
+
+### Complete OTL Template Library
+
+For additional OTL templates and comprehensive guides, refer to:
+- **TL_OTL_COMPREHENSIVE_GUIDE** - 50+ OTL patterns (late/early detection, regularization, etc.)
+- **README_OTL_KNOWLEDGE_BASE** - OTL knowledge base navigation and quick start
+
+### Template Usage Notes
+
+**OTL Templates (5.1-5.4):**
+- Focus on attendance tracking and shift management
+- Use HWM_TM_RPT_ENTRY_V for punch data
+- Always include TE_CREATION_DATE filter for latest version
+- Handle millisecond conversion for shift times (divide by 3,600,000)
+
+**Traditional TL Templates (1-4):**
+- Focus on timesheet processing and project time
+- Use HWM_TM_REC_SUMM and HWM_TM_REP_HIERARCHIES_VL
+- Always include USAGES_SOURCE_VERSION filter
+- Handle project/task attribute linkage
+
+---
 

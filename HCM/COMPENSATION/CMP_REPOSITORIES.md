@@ -3,7 +3,8 @@
 **Module:** Compensation Management  
 **Tag:** `#HCM #CMP #Repositories`  
 **Status:** Production-Ready  
-**Last Updated:** 18-Dec-2025
+**Last Updated:** 13-Jan-2026  
+**Version:** 2.0 (Merged with update file)
 
 ---
 
@@ -435,7 +436,219 @@ CMP_DEPT_AVG AS (
 
 ---
 
-**Last Updated:** 18-Dec-2025  
+## 10. Enhanced Pattern CTEs (02-Jan-2026 Update)
+
+### 10.1 PARAMETERS CTE (With Effective Date Filtering)
+
+**Purpose:** Parameter handling with effective date support  
+**Usage:** For historical compensation queries
+
+```sql
+WITH PARAMETERS AS (
+    /*+ qb_name(PARAMETERS) */
+    SELECT
+        TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY')) AS EFFECTIVE_DATE,
+        UPPER(NVL(:P_SALARY_BASIS, 'ALL')) AS SALARY_BASIS,
+        UPPER(NVL(:P_GRADE, 'ALL')) AS GRADE,
+        UPPER(NVL(:P_PAY_FREQUENCY, 'ALL')) AS PAY_FREQUENCY
+    FROM DUAL
+)
+```
+
+**Key Features:**
+- `EFFECTIVE_DATE` for point-in-time queries
+- `UPPER()` on all text parameters for case-insensitive comparison
+- `NVL()` with 'ALL' default for optional parameters
+
+**Benefits:**
+- Query salaries "as of" any past date
+- Case-insensitive filtering
+- Flexible parameter handling
+
+---
+
+### 10.2 CMP_SALARY_HISTORY (Enhanced with Effective Date)
+
+**Purpose:** Get salary history with effective date filtering  
+**Usage:** For "as of" date salary queries
+
+```sql
+,CMP_SALARY_HISTORY AS (
+    /*+ qb_name(CMP_SAL_HIST) MATERIALIZE */
+    SELECT
+        CSAL.PERSON_ID,
+        CSAL.SALARY_AMOUNT,
+        CSAL.SALARY_BASIS_ID,
+        CSB.NAME AS SALARY_BASIS_NAME,
+        TO_CHAR(CSAL.DATE_FROM, 'DD-MM-YYYY') AS EFFECTIVE_FROM,
+        TO_CHAR(CSAL.DATE_TO, 'DD-MM-YYYY') AS EFFECTIVE_TO
+    FROM
+        CMP_SALARY CSAL,
+        CMP_SALARY_BASIS CSB,
+        PARAMETERS P
+    WHERE
+        CSAL.SALARY_BASIS_ID = CSB.SALARY_BASIS_ID(+)
+    -- Salary active as of Effective Date
+    AND P.EFFECTIVE_DATE BETWEEN CSAL.DATE_FROM 
+        AND NVL(CSAL.DATE_TO, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
+)
+```
+
+**Key Features:**
+- Uses parameter date instead of SYSDATE
+- Dual date formats (formatted and raw)
+- Salary basis lookup
+
+**Benefits:**
+- Salary progression analysis
+- Historical compensation snapshots
+- Audit compliance
+
+---
+
+### 10.3 EMP_SERVICE (Service-Based Analysis)
+
+**Purpose:** Calculate service in years for compensation planning  
+**Usage:** When service duration affects compensation
+
+```sql
+,EMP_SERVICE AS (
+    /*+ qb_name(EMP_SERVICE) MATERIALIZE */
+    SELECT
+        PAPF.PERSON_ID,
+        ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+              NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) AS SERVICE_IN_YEARS
+    FROM
+        PER_ALL_PEOPLE_F PAPF,
+        PER_PERIODS_OF_SERVICE PPOS,
+        PARAMETERS P
+    WHERE
+        PAPF.PERSON_ID = PPOS.PERSON_ID
+    AND P.EFFECTIVE_DATE BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PPOS.DATE_START 
+        AND NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
+)
+```
+
+**Service Calculation Formula:**
+```sql
+ROUND(MONTHS_BETWEEN(EFFECTIVE_DATE, HIRE_DATE) / 12, 2)
+```
+
+**Benefits:**
+- Service-based compensation analysis
+- Salary progression tracking
+- Experience band classification
+
+---
+
+### 10.4 CMP_EXP_BAND (Experience Band Classification)
+
+**Purpose:** Classify employees by experience level for compensation analysis  
+**Usage:** For salary benchmarking and planning
+
+```sql
+,CMP_EXP_BAND AS (
+    /*+ qb_name(CMP_EXP) MATERIALIZE */
+    SELECT
+        ES.PERSON_ID,
+        ES.SERVICE_IN_YEARS,
+        CS.SALARY_AMOUNT,
+        CASE 
+            WHEN ES.SERVICE_IN_YEARS < 2 THEN 'Entry Level'
+            WHEN ES.SERVICE_IN_YEARS BETWEEN 2 AND 5 THEN 'Mid Level'
+            WHEN ES.SERVICE_IN_YEARS BETWEEN 5 AND 10 THEN 'Senior Level'
+            ELSE 'Expert Level'
+        END AS EXPERIENCE_BAND,
+        -- Salary per year of service
+        ROUND(CS.SALARY_AMOUNT / GREATEST(ES.SERVICE_IN_YEARS, 1), 2) AS SALARY_PER_SERVICE_YEAR
+    FROM
+        EMP_SERVICE ES,
+        CMP_SALARY_HISTORY CS
+    WHERE
+        ES.PERSON_ID = CS.PERSON_ID
+)
+```
+
+**Benefits:**
+- Compensation planning by experience level
+- Salary per service year analysis
+- Benchmarking support
+
+---
+
+### 10.5 MULTI-PARAMETER FILTERING PATTERN
+
+**Purpose:** Implement multiple optional filters with 'ALL' support  
+**Usage:** When report needs multiple independent filters
+
+```sql
+WHERE
+    EB.PERSON_ID = CS.PERSON_ID
+-- ... other joins ...
+
+-- Parameter Filters with 'ALL' support
+AND (UPPER(CSB.NAME) = P.SALARY_BASIS OR P.SALARY_BASIS = 'ALL')
+AND (UPPER(PG.NAME) = P.GRADE OR P.GRADE = 'ALL')
+AND (UPPER(CSB.PAY_FREQUENCY) = P.PAY_FREQUENCY OR P.PAY_FREQUENCY = 'ALL')
+
+ORDER BY 
+    TO_NUMBER(EB.PERSON_NUMBER)
+```
+
+**Key Features:**
+- **Case-Insensitive**: UPPER() on both sides
+- **'ALL' Bypass**: `OR PARAMETER = 'ALL'`
+- **Independent Filters**: Each works independently
+
+**Pattern Template:**
+```sql
+AND (UPPER(field_name) = P.PARAMETER_NAME OR P.PARAMETER_NAME = 'ALL')
+```
+
+---
+
+## 🎯 USAGE PATTERNS
+
+### Pattern 1: Historical Salary Query
+```sql
+WITH PARAMETERS AS (
+    SELECT 
+        TRUNC(TO_DATE('01-JAN-2023', 'DD-MON-YYYY')) AS EFFECTIVE_DATE
+    FROM DUAL
+)
+,CMP_SALARY_HISTORY AS (...)
+SELECT
+    PERSON_NUMBER,
+    FULL_NAME,
+    SALARY_AMOUNT,
+    SALARY_BASIS_NAME,
+    EFFECTIVE_FROM
+FROM CMP_SALARY_HISTORY
+WHERE SALARY_AMOUNT > 50000
+ORDER BY SALARY_AMOUNT DESC;
+
+-- Result: Shows salaries exactly as they were on 01-JAN-2023
+```
+
+### Pattern 2: Service-Based Compensation Analysis
+```sql
+SELECT
+    EXPERIENCE_BAND,
+    COUNT(*) AS EMPLOYEE_COUNT,
+    AVG(SALARY_AMOUNT) AS AVG_SALARY,
+    MIN(SALARY_AMOUNT) AS MIN_SALARY,
+    MAX(SALARY_AMOUNT) AS MAX_SALARY,
+    AVG(SALARY_PER_SERVICE_YEAR) AS AVG_SALARY_PER_YEAR
+FROM CMP_EXP_BAND
+GROUP BY EXPERIENCE_BAND
+ORDER BY AVG_SALARY;
+```
+
+---
+
+**Last Updated:** 13-Jan-2026  
 **Status:** Production-Ready  
-**Source:** 2 Production Compensation Queries
+**Version:** 2.0 (Merged with update file)  
+**Source:** 2 Production Compensation Queries + Cross-Module Knowledge Integration
 

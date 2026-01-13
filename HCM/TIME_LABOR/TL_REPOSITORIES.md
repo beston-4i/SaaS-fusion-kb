@@ -458,7 +458,230 @@ TL_MASTER AS (
 
 ---
 
-**Last Updated:** 18-Dec-2025  
+**Last Updated:** 13-Jan-2026  
 **Status:** Production-Ready  
-**Source:** Employee Timesheet Report (980 lines analyzed)
+**Source:** Employee Timesheet Report (980 lines analyzed) + Cross-Module Updates (02-Jan-2026)
+
+---
+
+## 9. Enhanced Date Filtering CTEs (02-Jan-2026 Update)
+
+### 9.1 TL_PARAMETERS (Parameter Management)
+
+**Purpose:** Centralized parameter handling with effective date support
+
+**When to Use:** For historical timecard queries, "as of" date reports
+
+```sql
+TL_PARAMETERS AS (
+    SELECT /*+ qb_name(TL_PARAMS) MATERIALIZE */
+           TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY')) AS EFFECTIVE_DATE,
+           TO_DATE(:P_START_DATE, 'DD-MON-YYYY') AS START_DATE,
+           TO_DATE(:P_END_DATE, 'DD-MON-YYYY') AS END_DATE,
+           UPPER(NVL(:P_TIME_ENTRY_TYPE, 'ALL')) AS TIME_ENTRY_TYPE,
+           UPPER(NVL(:P_PROJECT_NAME, 'ALL')) AS PROJECT_NAME,
+           UPPER(NVL(:P_STATUS, 'ALL')) AS STATUS
+    FROM DUAL
+)
+```
+
+**Benefits:**
+- Single source of parameters
+- Case-insensitive filtering
+- 'ALL' bypass for flexible filtering
+- Effective date for historical queries
+
+### 9.2 TL_TIMECARD_HISTORY (Historical Timecard CTE)
+
+**Purpose:** Query timecards for any historical period with effective date filtering
+
+**When to Use:** Historical hours analysis, audit compliance, past timecard reports
+
+```sql
+TL_TIMECARD_HISTORY AS (
+    SELECT /*+ qb_name(TL_TC_HIST) MATERIALIZE */
+           TMH.TM_REC_GRP_ID,
+           TMH.PERSON_ID,
+           TMD.TM_REC_ID,
+           TO_CHAR(TMD.START_TIME, 'YYYY-MM-DD') START_TIME,
+           TO_CHAR(TMD.STOP_TIME, 'DD-MON-YYYY') STOP_TIME,
+           TMD.MEASURE,
+           TMD.TM_REC_TYPE,
+           TMH.STATUS,
+           P.EFFECTIVE_DATE
+    FROM   HWM_TM_REC_SUMM TMH,
+           HWM_TM_REP_HIERARCHIES_VL TMD,
+           TL_PARAMETERS P
+    WHERE  TMH.TM_REC_GRP_ID = TMD.TM_REC_GRP_ID
+      AND  TMH.STATUS IN ('Approved', 'Submitted')
+      -- Timecard entries within date range
+      AND  TMD.START_TIME >= P.START_DATE
+      AND  TMD.STOP_TIME <= P.END_DATE
+      -- Use Effective Date for date-tracked lookups
+      AND  TMH.START_TIME >= P.START_DATE
+      AND  TMH.STOP_TIME <= P.END_DATE
+)
+```
+
+**Key Features:**
+- Parameter-based date filtering
+- Effective date support for "as of" queries
+- Historical audit trail
+- Flexible status filtering
+
+### 9.3 TL_EMP_SERVICE (Service Calculation)
+
+**Purpose:** Calculate employee service years for time-off eligibility
+
+**When to Use:** Time-off accrual calculation, eligibility determination, service-based benefits
+
+```sql
+TL_EMP_SERVICE AS (
+    SELECT /*+ qb_name(TL_EMP_SVC) MATERIALIZE */
+           PAPF.PERSON_ID,
+           PAPF.PERSON_NUMBER,
+           PPOS.DATE_START HIRE_DATE,
+           PPOS.ORIGINAL_DATE_OF_HIRE,
+           ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                 NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) AS SERVICE_IN_YEARS,
+           
+           -- Service-based entitlement
+           CASE 
+               WHEN ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                          NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) < 1
+               THEN 10  -- 10 days for first year
+               
+               WHEN ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                          NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) BETWEEN 1 AND 5
+               THEN 15  -- 15 days for 1-5 years
+               
+               WHEN ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                          NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) BETWEEN 5 AND 10
+               THEN 20  -- 20 days for 5-10 years
+               
+               ELSE 25  -- 25 days for 10+ years
+           END AS ANNUAL_LEAVE_ENTITLEMENT,
+           
+           -- Monthly accrual rate
+           ROUND(
+               CASE 
+                   WHEN ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                              NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) < 1
+                   THEN 10
+                   WHEN ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                              NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) BETWEEN 1 AND 5
+                   THEN 15
+                   WHEN ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+                              NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) BETWEEN 5 AND 10
+                   THEN 20
+                   ELSE 25
+               END / 12, 2
+           ) AS MONTHLY_ACCRUAL
+           
+    FROM   PER_ALL_PEOPLE_F PAPF,
+           PER_PERIODS_OF_SERVICE PPOS,
+           TL_PARAMETERS P
+    WHERE  PAPF.PERSON_ID = PPOS.PERSON_ID
+      AND  P.EFFECTIVE_DATE BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
+      AND  P.EFFECTIVE_DATE BETWEEN PPOS.DATE_START 
+           AND NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
+)
+```
+
+**Business Rules:**
+- < 1 year: 10 days
+- 1-5 years: 15 days
+- 5-10 years: 20 days
+- 10+ years: 25 days
+
+### 9.4 TL_FLEXIBLE_FILTER (Case-Insensitive Filtering)
+
+**Purpose:** Apply flexible, case-insensitive filters with 'ALL' bypass
+
+**When to Use:** All time & labor queries with user-entered filters
+
+**Pattern:**
+```sql
+-- In main query WHERE clause
+WHERE
+    (UPPER(TMD.TM_REC_TYPE) = P.TIME_ENTRY_TYPE OR P.TIME_ENTRY_TYPE = 'ALL')
+    AND (UPPER(PJP.NAME) = P.PROJECT_NAME OR P.PROJECT_NAME = 'ALL')
+    AND (UPPER(TMH.STATUS) = P.STATUS OR P.STATUS = 'ALL')
+```
+
+**Benefits:**
+- Users can enter "regular" or "Regular" or "REGULAR"
+- 'ALL' shows all records
+- Consistent with other HCM modules
+- Reduces filter errors
+
+---
+
+## 10. Integration Examples
+
+### Example 1: Historical Timecard Report with Service Calculation
+
+```sql
+WITH
+TL_PARAMETERS AS (/* parameter CTE */),
+TL_TIMECARD_HISTORY AS (/* history CTE */),
+TL_EMP_SERVICE AS (/* service CTE */)
+
+SELECT
+    SVC.PERSON_NUMBER,
+    PPNF.DISPLAY_NAME,
+    SVC.HIRE_DATE,
+    SVC.SERVICE_IN_YEARS,
+    SVC.ANNUAL_LEAVE_ENTITLEMENT,
+    TCH.START_TIME,
+    TCH.STOP_TIME,
+    TCH.MEASURE,
+    TCH.STATUS
+FROM
+    TL_TIMECARD_HISTORY TCH,
+    TL_EMP_SERVICE SVC,
+    PER_PERSON_NAMES_F PPNF
+WHERE
+    TCH.PERSON_ID = SVC.PERSON_ID
+    AND TCH.PERSON_ID = PPNF.PERSON_ID
+    AND PPNF.NAME_TYPE = 'GLOBAL'
+ORDER BY SVC.PERSON_NUMBER, TCH.START_TIME;
+```
+
+### Example 2: Time-Off Eligibility with Flexible Filtering
+
+```sql
+WITH
+TL_PARAMETERS AS (/* parameter CTE */),
+TL_EMP_SERVICE AS (/* service CTE */)
+
+SELECT
+    SVC.PERSON_NUMBER,
+    PPNF.DISPLAY_NAME,
+    HDORG.NAME DEPARTMENT,
+    SVC.SERVICE_IN_YEARS,
+    SVC.ANNUAL_LEAVE_ENTITLEMENT,
+    SVC.MONTHLY_ACCRUAL
+FROM
+    TL_EMP_SERVICE SVC,
+    PER_PERSON_NAMES_F PPNF,
+    PER_ALL_ASSIGNMENTS_M PAAM,
+    HR_ORGANIZATION_UNITS_F_TL HDORG,
+    TL_PARAMETERS P
+WHERE
+    SVC.PERSON_ID = PPNF.PERSON_ID
+    AND SVC.PERSON_ID = PAAM.PERSON_ID
+    AND PAAM.ORGANIZATION_ID = HDORG.ORGANIZATION_ID
+    AND PPNF.NAME_TYPE = 'GLOBAL'
+    AND PAAM.PRIMARY_FLAG = 'Y'
+    AND PAAM.EFFECTIVE_LATEST_CHANGE = 'Y'
+    AND HDORG.LANGUAGE = 'US'
+    AND TRUNC(SYSDATE) BETWEEN PPNF.EFFECTIVE_START_DATE AND PPNF.EFFECTIVE_END_DATE
+    AND TRUNC(SYSDATE) BETWEEN HDORG.EFFECTIVE_START_DATE AND HDORG.EFFECTIVE_END_DATE
+ORDER BY SVC.SERVICE_IN_YEARS DESC;
+```
+
+---
+
+**Note:** These enhanced CTEs complement existing Time & Labor patterns and do not replace critical timecard constraints (version handling, status filtering, date-track filtering).
 

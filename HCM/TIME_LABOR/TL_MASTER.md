@@ -482,7 +482,250 @@ CASE WHEN TMH.STATUS = 'Approved' THEN TMH.LAST_UPDATE_DATE END APPROVAL_DATE
 
 ---
 
-**Last Updated:** 18-Dec-2025  
+**Last Updated:** 13-Jan-2026  
 **Status:** Production-Ready  
-**Source:** Employee Timesheet Report (980 lines analyzed)
+**Source:** Employee Timesheet Report (980 lines analyzed) + OTL Production Queries (10 files)
+
+---
+
+## 9. 🚀 Advanced OTL Patterns (07-Jan-2026)
+
+### 9.1 HWM_TM_REP_ATRB_USAGES Latest Version Pattern
+
+**Problem:** Get latest attribute usage version for timecard
+
+**Solution:**
+
+```sql
+SELECT
+    TMD.TM_REC_ID,
+    
+    -- Project (latest version)
+    (SELECT PJP.SEGMENT1
+     FROM
+         HWM_TM_REP_ATRB_USAGES AUSG,
+         HWM_TM_REP_ATRBS ATR,
+         PJF_PROJECTS_ALL_VL PJP
+     WHERE
+         TMD.TM_REC_ID = AUSG.USAGES_SOURCE_ID
+         AND AUSG.TM_REP_ATRB_ID = ATR.TM_REP_ATRB_ID
+         AND ATR.ATTRIBUTE_CATEGORY = 'Projects'
+         AND ATR.ATTRIBUTE_NUMBER1 = PJP.PROJECT_ID
+         
+         -- CRITICAL: Get latest usage version
+         AND AUSG.USAGES_SOURCE_VERSION = (
+             SELECT MAX(A1.USAGES_SOURCE_VERSION)
+             FROM HWM_TM_REP_ATRB_USAGES A1
+             WHERE A1.USAGES_SOURCE_ID = TMD.TM_REC_ID
+         )
+         AND ROWNUM = 1
+    ) PROJECT_NUMBER
+FROM HWM_EXT_TIMECARD_DETAIL_V TMD
+```
+
+**Why Critical:**
+- Timecard attributes can be updated/versioned
+- Must use `MAX(USAGES_SOURCE_VERSION)` to get latest
+- Without this, may get old/deleted attribute values
+
+**Attribute Categories:**
+- `'Projects'` - Project attributes (ATTRIBUTE_NUMBER1 = PROJECT_ID, ATTRIBUTE_NUMBER2 = TASK_ID)
+- `TO_CHAR(EXPENDITURE_TYPE_ID)` - Expenditure type
+- `TO_CHAR(ABSENCE_TYPE_ID)` - Absence type
+- `'ORA_CUSTOM'` - Custom attributes
+- `'STAT HOLIDAY'` - Stat holiday attribute
+
+### 9.2 Custom Attribute Detection (Leave Project Reference)
+
+**Problem:** Detect if timecard is for leave project vs regular project
+
+**Solution:**
+
+```sql
+-- Leave project reference
+NVL(
+    -- Check for custom attribute indicating leave/fringe
+    (SELECT DECODE(C.ATTRIBUTE_VARCHAR1, '1', 'Fringe', C.ATTRIBUTE_VARCHAR1)
+     FROM
+         HWM_TM_REP_ATRB_USAGES B,
+         HWM_TM_REP_ATRBS C
+     WHERE
+         TMD.TM_REC_ID = B.USAGES_SOURCE_ID
+         AND B.TM_REP_ATRB_ID = C.TM_REP_ATRB_ID
+         AND C.ATTRIBUTE_CATEGORY = 'ORA_CUSTOM'
+         AND C.ATTRIBUTE_VARCHAR1 IN ('1', 'O003 | Regular Time', 'O009 | Regular Time')
+         AND B.USAGES_SOURCE_VERSION = (
+             SELECT MAX(A1.USAGES_SOURCE_VERSION)
+             FROM HWM_TM_REP_ATRB_USAGES A1
+             WHERE A1.USAGES_SOURCE_ID = TMD.TM_REC_ID
+         )
+    ),
+    -- Otherwise, show project | task reference
+    (SELECT PJP.SEGMENT1 || ' | ' || PJT.TASK_NUMBER
+     FROM
+         HWM_TM_REP_ATRB_USAGES B,
+         HWM_TM_REP_ATRBS C,
+         PJF_PROJECTS_ALL_VL PJP,
+         PJF_TASKS_V PJT
+     WHERE
+         TMD.TM_REC_ID = B.USAGES_SOURCE_ID
+         AND B.TM_REP_ATRB_ID = C.TM_REP_ATRB_ID
+         AND C.ATTRIBUTE_CATEGORY = 'ORA_CUSTOM'
+         AND C.ATTRIBUTE_VARCHAR1 NOT IN ('1', 'O003 | Regular Time')
+         AND C.ATTRIBUTE_VARCHAR1 = TO_CHAR(PJT.TASK_ID)
+         AND PJT.PROJECT_ID = PJP.PROJECT_ID
+         AND B.USAGES_SOURCE_VERSION = (
+             SELECT MAX(A1.USAGES_SOURCE_VERSION)
+             FROM HWM_TM_REP_ATRB_USAGES A1
+             WHERE A1.USAGES_SOURCE_ID = TMD.TM_REC_ID
+         )
+    )
+) LEAVE_PROJECT_REFERENCE
+```
+
+**Purpose:** Distinguish between regular time (non-project, fringe), leave projects (absence tracking via projects), and actual project work
+
+### 9.3 Payroll Time Type from Timecard
+
+**Problem:** Get payroll time type assigned to timecard
+
+**Solution:**
+
+```sql
+-- Payroll time type
+(SELECT A.PAY_PAYROLL_TIME_TYPE
+ FROM HWM_TM_REP_M_PTT_ATRBS_V A
+ WHERE A.USAGES_SOURCE_ID = TMD.TM_REC_ID
+ AND A.USAGES_SOURCE_VERSION = (
+     SELECT MAX(A1.USAGES_SOURCE_VERSION)
+     FROM HWM_TM_REP_ATRB_USAGES A1
+     WHERE A1.USAGES_SOURCE_ID = TMD.TM_REC_ID
+ )
+) PAYROLL_TIME_TYPE
+```
+
+**Table:** `HWM_TM_REP_M_PTT_ATRBS_V`  
+**Purpose:** View that joins timecard attributes to payroll time types
+
+### 9.4 Stat Holiday Detection
+
+**Solution:**
+
+```sql
+-- Stat holiday detection
+(SELECT UPPER(MAX(C.ATTRIBUTE_CATEGORY))
+ FROM
+     HWM_TM_REP_ATRB_USAGES B,
+     HWM_TM_REP_ATRBS C
+ WHERE
+     TMD.TM_REC_ID = B.USAGES_SOURCE_ID
+     AND B.TM_REP_ATRB_ID = C.TM_REP_ATRB_ID
+     AND UPPER(C.ATTRIBUTE_CATEGORY) LIKE 'STAT%HOLIDAY%'
+     AND B.USAGES_SOURCE_VERSION = (
+         SELECT MAX(A1.USAGES_SOURCE_VERSION)
+         FROM HWM_TM_REP_ATRB_USAGES A1
+         WHERE A1.USAGES_SOURCE_ID = TMD.TM_REC_ID
+     )
+) STAT_HOLIDAY
+```
+
+### 9.5 Project-Based Approval Hierarchy
+
+**Problem:** Determine approver based on project assignment (task manager → project manager → line manager)
+
+**Approval Hierarchy:**
+```
+1. Task Manager (if project task assigned)
+   ↓ (if not found)
+2. Project Manager (if project assigned)
+   ↓ (if not found or not project time)
+3. Line Manager (default)
+```
+
+**Solution:** See TL_OTL_COMPREHENSIVE_GUIDE for complete implementation
+
+### 9.6 Project Status Integration
+
+**Problem:** Get project costing status for timecard line
+
+**Solution:**
+
+```sql
+-- Project status (from HWM_TM_A_APP_STATUS_PJC_V)
+(SELECT DISTINCT INITCAP(PJCS.STATUS_VALUE)
+ FROM HWM_TM_A_APP_STATUS_PJC_V PJCS
+ WHERE PJCS.TM_BLDG_BLK_ID = TMD.TM_REC_ID
+ AND PJCS.TM_BLDG_BLK_VERSION = TMD.TM_REC_VERSION
+) LINE_STATUS_PROJECT
+```
+
+**Tables:**
+- `HWM_TM_A_APP_STATUS_PJC_V` - Timecard-to-project costing approval status
+- Links timecard to project costing approval workflow
+
+### 9.7 Critical OTL Tables
+
+#### HWM_TM_REP_ATRB_USAGES (Timecard Attribute Usages)
+
+**Purpose:** Link timecard records to attributes (projects, tasks, expenditure types)
+
+**Critical Columns:**
+- `USAGES_SOURCE_ID` - TM_REC_ID (timecard line)
+- `USAGES_SOURCE_VERSION` - Version number (CRITICAL: use MAX)
+- `TM_REP_ATRB_ID` - Links to HWM_TM_REP_ATRBS
+
+**Why Versioning Matters:**
+- Timecards can be edited
+- Each edit creates new version
+- Old versions retained
+- **MUST** use MAX(USAGES_SOURCE_VERSION)
+
+#### HWM_TM_REP_ATRBS (Timecard Attributes)
+
+**Purpose:** Define timecard attributes
+
+**Critical Columns:**
+- `TM_REP_ATRB_ID` - Primary key
+- `ATTRIBUTE_CATEGORY` - Category/type
+- `ATTRIBUTE_NUMBER1` - First numeric attribute (e.g., PROJECT_ID)
+- `ATTRIBUTE_NUMBER2` - Second numeric attribute (e.g., TASK_ID)
+- `ATTRIBUTE_VARCHAR1` - First character attribute
+
+**Common Categories:**
+- `'Projects'` - Project/task attributes
+- `TO_CHAR(EXPENDITURE_TYPE_ID)` - Expenditure type
+- `TO_CHAR(ABSENCE_TYPE_ID)` - Absence type
+- `'ORA_CUSTOM'` - Custom attributes
+- `'STAT HOLIDAY'` - Stat holiday
+
+#### HWM_TM_REP_M_PTT_ATRBS_V (Payroll Time Type View)
+
+**Purpose:** View linking timecard to payroll time types
+
+**Columns:**
+- `USAGES_SOURCE_ID` - TM_REC_ID
+- `USAGES_SOURCE_VERSION` - Version
+- `PAY_PAYROLL_TIME_TYPE` - Payroll time type name
+
+#### HWM_TM_A_APP_STATUS_PJC_V (Project Costing Approval Status)
+
+**Purpose:** Timecard-to-project costing approval status
+
+**Columns:**
+- `TM_BLDG_BLK_ID` - TM_REC_ID or TM_REC_GRP_ID
+- `TM_BLDG_BLK_VERSION` - Version
+- `STATUS_VALUE` - Status (e.g., 'Approved', 'Rejected')
+
+---
+
+## 10. 📚 Additional Resources
+
+### OTL Knowledge Base Reference
+
+For comprehensive Oracle Time & Labor (OTL) attendance and shift management patterns, refer to:
+- **TL_OTL_COMPREHENSIVE_GUIDE** - Complete OTL implementation guide (50+ patterns)
+- **TL_OTL_QUERY_TEMPLATES** - 8 ready-to-use OTL query templates
+- **TL_OTL_KNOWLEDGE_SUMMARY** - Quick start guide and troubleshooting
+
+**Note:** The OTL files focus on attendance tracking, shift management, and time clock operations, while TL_MASTER focuses on timesheet processing and project time tracking.
 

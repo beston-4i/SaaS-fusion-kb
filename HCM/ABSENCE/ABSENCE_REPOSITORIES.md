@@ -3,7 +3,8 @@
 **Module:** HCM Absence Management  
 **Purpose:** Ready-to-use CTE components for absence/leave queries  
 **Tag:** `#HCM #ABSENCE #REPOSITORIES #CTEs`  
-**Date:** 18-12-25
+**Last Updated:** 07-Jan-2026  
+**Version:** 2.0 (Merged with update file)
 
 ---
 
@@ -11,13 +12,19 @@
 
 | CTE Name | Purpose | Source Tables | Use Case |
 |----------|---------|---------------|----------|
+| **PARAMETERS (Enhanced)** | Parameter handling with case-insensitive filtering | Parameters | All reports with filters |
 | **PERIOD** | Date range & employee filter | Parameters | All reports |
 | **EMP_MASTER** | Employee base details | PER_ALL_PEOPLE_F, PER_PERSON_NAMES_F | All employee queries |
+| **EMP_BASE (Enhanced)** | Employee base with service calculation | PER_ALL_PEOPLE_F, PPOS | Reports requiring service years |
 | **EMP_ASSIGNMENT** | Assignment & org details | PER_ALL_ASSIGNMENTS_F, departments | All queries |
+| **EMP_ASSIGNMENT (Enhanced FT/PT)** | Assignment with Full Time/Part Time classification | PER_ALL_ASSIGNMENTS_F | Reports with FT/PT status |
+| **EMP_DFF** | DFF attribute mapping | EMP_ASSIGNMENT | Reports with DFF fields |
 | **DEPARTMENTS** | Organization/Department hierarchy | HR_ALL_ORGANIZATION_UNITS_F | Org structure queries |
 | **LEAVE_TRANSACTIONS** | Absence entries (approved) | ANC_PER_ABS_ENTRIES | Leave history reports |
+| **LEAVE_TRANSACTIONS (Enhanced)** | With unpaid leave tracking | ANC_PER_ABS_ENTRIES, AATFT | Reports tracking unpaid leave |
 | **ABSENCE_TYPES** | Leave type master | ANC_ABSENCE_TYPES_F_TL | Type classification |
 | **ANNUAL_LEAVE_BALANCE** | Annual leave balance | ANC_PER_ACCRUAL_ENTRIES | Balance reports |
+| **ACCRUAL_BALANCE (Enhanced)** | With PY/CY year breakdown | ANC_PER_ACCRUAL_ENTRIES | Comprehensive balance |
 | **LEAVE_BALANCES** | All leave plan balances | ANC_PER_ACCRUAL_ENTRIES | Multi-plan balance |
 | **SUPERVISOR** | Manager hierarchy | PER_ASSIGNMENT_SUPERVISORS_F | Manager approval queries |
 | **WORKFLOW_APPROVAL** | Approval workflow history | FA_FUSION_SOAINFRA.WFTASK | Approval tracking |
@@ -30,10 +37,45 @@
 | **CURRENT_ABSENCE_ENTRIES** | Current/ongoing absences | ANC_PER_ABS_ENTRIES | Current absence activity |
 | **TERMINATED_EMP_FILTER** | Employee with termination handling | PER_ALL_ASSIGNMENTS_F, PPOS | Terminated employee queries |
 | **ACCRUAL_BALANCE_CURRENT_YEAR** | Current year balance only | ANC_PER_ACCRUAL_ENTRIES | Year-specific balance |
+| **PLAN_ENROLLMENT** | Absence plan enrollment | ANC_PER_ENROLLMENTS | Plan-based queries |
+| **CARRYOVER_DETAILS** | Carryover and expiry | ANC_PER_CARRYOVER | Balance with carryover |
+| **ENCASHMENT_DETAILS** | Leave encashment | ANC_PER_ENCASHMENTS | Encashment tracking |
 
 ---
 
-## 1. PERIOD CTE
+## 1. PARAMETERS CTE (Enhanced with Case-Insensitive Filtering)
+
+**Purpose:** Parameter handling with automatic case normalization  
+**Usage:** Use when parameters need case-insensitive comparison
+
+```sql
+WITH PARAMETERS AS (
+    /*+ qb_name(PARAMETERS) */
+    SELECT
+        TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY')) AS EFFECTIVE_DATE,
+        UPPER(NVL(:P_LEGAL_EMPLOYER, 'ALL')) AS LEGAL_EMPLOYER,
+        UPPER(NVL(:P_ABSENCE_PLAN, 'ALL')) AS ABSENCE_PLAN,
+        UPPER(NVL(:P_JOB_TITLE, 'ALL')) AS JOB_TITLE,
+        UPPER(NVL(:P_EMPLOYEE_TYPE, 'ALL')) AS EMPLOYEE_TYPE,
+        UPPER(NVL(:P_LOCATION, 'ALL')) AS LOCATION
+    FROM DUAL
+)
+```
+
+**Key Features:**
+- `UPPER()` function on all text parameters for case-insensitive comparison
+- `NVL()` with 'ALL' default for optional parameters
+- `TRUNC(TO_DATE())` for date parameter with explicit format
+- All parameters accessible throughout query via cross join
+
+**Benefits:**
+- User doesn't need to match exact case
+- Consistent handling of NULL parameters
+- Single source of truth for parameter values
+
+---
+
+## 2. PERIOD CTE
 **Purpose:** Parameter-driven date range and employee filter  
 **Usage:** Copy at the start of every query
 
@@ -57,7 +99,7 @@ WITH PERIOD AS (
 
 ---
 
-## 2. DEPARTMENTS CTE
+## 3. DEPARTMENTS CTE
 **Purpose:** Organization/Department hierarchy with proper classification  
 **Usage:** Standard department lookup for all queries
 
@@ -90,7 +132,7 @@ WITH PERIOD AS (
 
 ---
 
-## 3. EMP_MASTER CTE
+## 4. EMP_MASTER CTE
 **Purpose:** Employee base details (person and names)  
 **Usage:** Foundation for all employee queries
 
@@ -130,7 +172,67 @@ WITH PERIOD AS (
 
 ---
 
-## 4. EMP_ASSIGNMENT CTE
+## 5. EMP_BASE WITH SERVICE CALCULATION (Enhanced)
+
+**Purpose:** Employee base with service years calculation  
+**Usage:** When service duration is required in reports
+
+```sql
+,EMP_BASE AS (
+    /*+ qb_name(EMP_BASE) */
+    SELECT
+        PAPF.PERSON_ID,
+        PAPF.PERSON_NUMBER,
+        PPNF.FULL_NAME,
+        PPNF.DISPLAY_NAME,
+        PPTTL.USER_PERSON_TYPE AS PERSON_TYPE,
+        PPOS.PERIOD_OF_SERVICE_ID,
+        TO_CHAR(NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START), 'DD-MM-YYYY') AS HIRE_DATE,
+        NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START) AS HIRE_DATE_RAW,
+        PPOS.DATE_START,
+        PPOS.ACTUAL_TERMINATION_DATE,
+        -- Calculate Service in Years as of Effective Date
+        ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) AS SERVICE_IN_YEARS
+    FROM
+        PER_ALL_PEOPLE_F PAPF,
+        PER_PERSON_NAMES_F PPNF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_PERSON_TYPES_TL PPTTL,
+        PER_PERIODS_OF_SERVICE PPOS,
+        PARAMETERS P
+    WHERE
+        PAPF.PERSON_ID = PPNF.PERSON_ID
+    AND PAPF.PERSON_ID = PAAF.PERSON_ID
+    AND PAAF.PERSON_TYPE_ID = PPTTL.PERSON_TYPE_ID(+)
+    AND PAPF.PERSON_ID = PPOS.PERSON_ID
+    AND PPNF.NAME_TYPE = 'GLOBAL'
+    AND PPTTL.LANGUAGE(+) = 'US'
+    AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+    AND PAAF.PRIMARY_FLAG = 'Y'
+    AND PAAF.ASSIGNMENT_TYPE = 'E'
+    -- Date-track filtering using P.EFFECTIVE_DATE (NOT SYSDATE)
+    AND P.EFFECTIVE_DATE BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PPNF.EFFECTIVE_START_DATE AND PPNF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PAAF.EFFECTIVE_START_DATE AND PAAF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PPOS.DATE_START 
+        AND NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
+)
+```
+
+**Key Features:**
+- **Service calculation**: `ROUND(MONTHS_BETWEEN(...) / 12, 2)` gives years of service
+- **Dual date formats**: Both formatted (DD-MM-YYYY) and raw date for different uses
+- **Effective Date filtering**: Uses parameter date instead of SYSDATE
+- **Termination handling**: NVL with far future date for active employees
+
+**Service Calculation Formula:**
+```sql
+ROUND(MONTHS_BETWEEN(EFFECTIVE_DATE, HIRE_DATE) / 12, 2)
+```
+
+---
+
+## 6. EMP_ASSIGNMENT CTE
 **Purpose:** Assignment details with job and department  
 **Usage:** For organizational context in reports
 
@@ -171,7 +273,143 @@ WITH PERIOD AS (
 
 ---
 
-## 5. SUPERVISOR CTE
+## 7. EMP_ASSIGNMENT WITH FULL TIME/PART TIME CLASSIFICATION (Enhanced)
+
+**Purpose:** Assignment details with employee classification  
+**Usage:** When FT/PT status is required
+
+```sql
+,EMP_ASSIGNMENT AS (
+    /*+ qb_name(EMP_ASSIGNMENT) */
+    SELECT
+        PAAF.PERSON_ID,
+        PAAF.ASSIGNMENT_ID,
+        PAAF.ASSIGNMENT_NUMBER,
+        PAAF.ORGANIZATION_ID,
+        PAAF.BUSINESS_UNIT_ID,
+        PAAF.LOCATION_ID,
+        PAAF.GRADE_ID,
+        PAAF.ASSIGNMENT_CATEGORY,
+        PAAF.POSITION_ID,
+        PAAF.JOB_ID,
+        PAAF.LEGAL_ENTITY_ID,
+        PAAF.NORMAL_HOURS,
+        PAAF.FREQUENCY,
+        -- Job and Position
+        PJFV.NAME AS JOB_TITLE,
+        HAPL.NAME AS POSITION_TITLE,
+        -- Organization
+        PD.NAME AS DEPARTMENT_NAME,
+        HAOULE.NAME AS LEGAL_EMPLOYER_NAME,
+        HAOUBU.NAME AS BUSINESS_UNIT_NAME,
+        HLOCVL.LOCATION_NAME,
+        -- Grade
+        PGFV.NAME AS GRADE_NAME,
+        -- Worker Type
+        PAAF.ASSIGNMENT_CATEGORY AS WORKER_TYPE,
+        -- Full Time / Part Time determination
+        CASE 
+            WHEN NVL(PAAF.NORMAL_HOURS, 0) >= 40 THEN 'Full Time'
+            WHEN NVL(PAAF.NORMAL_HOURS, 0) > 0 AND NVL(PAAF.NORMAL_HOURS, 0) < 40 THEN 'Part Time'
+            ELSE 'Not Specified'
+        END AS FULL_TIME_PART_TIME,
+        -- DFF Attributes (for reference)
+        PAAF.ATTRIBUTE1,
+        PAAF.ATTRIBUTE2,
+        PAAF.ATTRIBUTE3,
+        PAAF.ATTRIBUTE4,
+        PAAF.ATTRIBUTE5
+    FROM
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_JOBS_F_VL PJFV,
+        HR_ALL_POSITIONS_F_TL HAPL,
+        PER_DEPARTMENTS PD,
+        HR_ALL_ORGANIZATION_UNITS HAOULE,
+        HR_ALL_ORGANIZATION_UNITS HAOUBU,
+        HR_LOCATIONS_ALL_F_VL HLOCVL,
+        PER_GRADES_F_VL PGFV,
+        PARAMETERS P
+    WHERE
+        PAAF.JOB_ID = PJFV.JOB_ID(+)
+    AND PAAF.POSITION_ID = HAPL.POSITION_ID(+)
+    AND PAAF.ORGANIZATION_ID = PD.ORGANIZATION_ID(+)
+    AND PAAF.LEGAL_ENTITY_ID = HAOULE.ORGANIZATION_ID(+)
+    AND PAAF.BUSINESS_UNIT_ID = HAOUBU.ORGANIZATION_ID(+)
+    AND PAAF.LOCATION_ID = HLOCVL.LOCATION_ID(+)
+    AND PAAF.GRADE_ID = PGFV.GRADE_ID(+)
+    AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+    AND PAAF.PRIMARY_FLAG = 'Y'
+    AND PAAF.ASSIGNMENT_TYPE = 'E'
+    AND HAPL.LANGUAGE(+) = 'US'
+    AND PGFV.LANGUAGE(+) = 'US'
+    AND P.EFFECTIVE_DATE BETWEEN PAAF.EFFECTIVE_START_DATE AND PAAF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PJFV.EFFECTIVE_START_DATE(+) AND PJFV.EFFECTIVE_END_DATE(+)
+    AND P.EFFECTIVE_DATE BETWEEN HAPL.EFFECTIVE_START_DATE(+) AND HAPL.EFFECTIVE_END_DATE(+)
+    AND P.EFFECTIVE_DATE BETWEEN PD.EFFECTIVE_START_DATE(+) AND PD.EFFECTIVE_END_DATE(+)
+    AND P.EFFECTIVE_DATE BETWEEN HLOCVL.EFFECTIVE_START_DATE(+) AND HLOCVL.EFFECTIVE_END_DATE(+)
+    AND P.EFFECTIVE_DATE BETWEEN PGFV.EFFECTIVE_START_DATE(+) AND PGFV.EFFECTIVE_END_DATE(+)
+)
+```
+
+**Key Features:**
+- **FT/PT Classification**: Based on NORMAL_HOURS (>= 40 = Full Time, < 40 = Part Time)
+- **Comprehensive Org Data**: Legal employer, business unit, location, department
+- **DFF Attributes**: Exposed for further processing
+- **Multiple Org Units**: Separate aliases for different organization types
+
+**FT/PT Logic:**
+```sql
+CASE 
+    WHEN NVL(NORMAL_HOURS, 0) >= 40 THEN 'Full Time'
+    WHEN NVL(NORMAL_HOURS, 0) > 0 AND NVL(NORMAL_HOURS, 0) < 40 THEN 'Part Time'
+    ELSE 'Not Specified'
+END
+```
+
+---
+
+## 8. DFF ATTRIBUTE HANDLING CTE (New Pattern)
+
+**Purpose:** Extract and map Descriptive Flexfield attributes  
+**Usage:** When DFF fields need to be mapped to business fields
+
+```sql
+,EMP_DFF AS (
+    /*+ qb_name(EMP_DFF) */
+    SELECT
+        EA.PERSON_ID,
+        EA.ASSIGNMENT_ID,
+        -- Map DFF attributes to business fields
+        -- Update these mappings based on FND_DESCR_FLEX_COLUMN_USAGES query
+        EA.ATTRIBUTE1 AS CONTRACT_TYPE,
+        EA.ATTRIBUTE5 AS CLIENT_JOB_TITLE,
+        EA.ATTRIBUTE3 AS PROJECT_NUMBER,
+        EA.ATTRIBUTE4 AS SERVICE_LINE
+    FROM
+        EMP_ASSIGNMENT EA
+)
+```
+
+**Key Features:**
+- **Separate CTE**: Isolates DFF logic for easy maintenance
+- **Business Field Mapping**: Maps technical attributes to business names
+- **Documentation**: Comments indicate where to find correct mappings
+
+**Discovery Query for DFF Mapping:**
+```sql
+SELECT 
+    DFC.APPLICATION_COLUMN_NAME,
+    DFC.END_USER_COLUMN_NAME,
+    DFC.COLUMN_SEQ_NUM
+FROM FND_DESCR_FLEX_COLUMN_USAGES DFC
+WHERE DFC.APPLICATION_TABLE_NAME = 'PER_ALL_ASSIGNMENTS_F'
+AND DFC.ENABLED_FLAG = 'Y'
+ORDER BY DFC.COLUMN_SEQ_NUM
+```
+
+---
+
+## 9. SUPERVISOR CTE
 **Purpose:** Manager/Supervisor hierarchy with job details  
 **Usage:** For manager approval queries and reporting structure
 
@@ -211,7 +449,7 @@ WITH PERIOD AS (
 
 ---
 
-## 6. ANNUAL_LEAVE_BALANCE CTE
+## 10. ANNUAL_LEAVE_BALANCE CTE
 **Purpose:** Annual leave balance (latest accrual period)  
 **Usage:** For annual leave balance queries
 
@@ -245,7 +483,64 @@ WITH PERIOD AS (
 
 ---
 
-## 7. LEAVE_BALANCES CTE (Generic - All Plans)
+## 11. ACCRUAL_BALANCE WITH YEAR BREAKDOWN (Enhanced)
+
+**Purpose:** Accrual balance with Previous Year vs Current Year breakdown  
+**Usage:** When PY carryover and CY accrued need to be separated
+
+```sql
+,ACCRUAL_BALANCE AS (
+    /*+ qb_name(ACCRUAL_BALANCE) */
+    SELECT
+        APAE.PERSON_ID,
+        APAE.PLAN_ID,
+        APAE.PRD_OF_SVC_ID,
+        -- Previous Year Carry Forward (balance from prior years)
+        SUM(CASE 
+            WHEN TO_CHAR(APAE.ACCRUAL_PERIOD, 'YYYY') < TO_CHAR(P.EFFECTIVE_DATE, 'YYYY')
+            THEN NVL(APAE.END_BAL, 0)
+            ELSE 0 
+        END) AS PY_CARRY_FORWARD,
+        -- Current Year Accrued (accrued in current year)
+        SUM(CASE 
+            WHEN TO_CHAR(APAE.ACCRUAL_PERIOD, 'YYYY') = TO_CHAR(P.EFFECTIVE_DATE, 'YYYY')
+            THEN NVL(APAE.ACCRUAL_BALANCE, 0)
+            ELSE 0 
+        END) AS CY_ACCRUED,
+        -- Adjustments (sum of manual adjustments)
+        SUM(NVL(APAE.ADJUSTMENT, 0)) AS BALANCE_ADJUSTMENT,
+        -- Entitlement Override (latest value)
+        MAX(APAE.ENTITLEMENT_OVERRIDE) AS ENTITLEMENT_OVERRIDE,
+        -- Annual Entitlement (accrual rate per annum)
+        MAX(APAE.ACCRUAL_RATE) AS ANNUAL_ENTITLEMENT
+    FROM
+        ANC_PER_ACCRUAL_ENTRIES APAE,
+        PARAMETERS P
+    WHERE
+        APAE.ACCRUAL_PERIOD <= P.EFFECTIVE_DATE
+    GROUP BY 
+        APAE.PERSON_ID, 
+        APAE.PLAN_ID, 
+        APAE.PRD_OF_SVC_ID,
+        P.EFFECTIVE_DATE
+)
+```
+
+**Key Features:**
+- **Year Comparison**: `TO_CHAR(ACCRUAL_PERIOD, 'YYYY')` vs `TO_CHAR(EFFECTIVE_DATE, 'YYYY')`
+- **PY Logic**: Sum of END_BAL from years prior to effective year
+- **CY Logic**: Sum of ACCRUAL_BALANCE from current year only
+- **Adjustments**: Captures manual balance changes
+
+**Balance Component Breakdown:**
+```
+PY Carry Forward = Sum of END_BAL where year < current year
+CY Accrued       = Sum of ACCRUAL_BALANCE where year = current year
+```
+
+---
+
+## 12. LEAVE_BALANCES CTE (Generic - All Plans)
 **Purpose:** Current leave balances for all absence plans  
 **Usage:** For multi-plan balance reports
 
@@ -290,7 +585,7 @@ WITH PERIOD AS (
 
 ---
 
-## 8. LEAVE_TRANSACTIONS CTE (Approved Leaves)
+## 13. LEAVE_TRANSACTIONS CTE (Approved Leaves)
 **Purpose:** Absence entries with approval status (approved leaves only)  
 **Usage:** For leave history and detail reports
 
@@ -334,7 +629,70 @@ WITH PERIOD AS (
 
 ---
 
-## 9. ABSENCE_TYPES CTE
+## 14. LEAVE_TRANSACTIONS WITH UNPAID IDENTIFICATION (Enhanced)
+
+**Purpose:** Leave transactions with separate unpaid leave tracking  
+**Usage:** When unpaid leave needs to be reported separately
+
+```sql
+,LEAVE_TRANSACTIONS AS (
+    /*+ qb_name(LEAVE_TRANSACTIONS) */
+    SELECT
+        APAE.PERSON_ID,
+        APAE.PLAN_ID,
+        -- Leave Applied (all non-withdrawn leaves)
+        SUM(CASE 
+            WHEN APAE.ABSENCE_STATUS_CD <> 'ORA_WITHDRAWN'
+            AND APAE.START_DATE <= P.EFFECTIVE_DATE
+            THEN NVL(APAE.DURATION, 0)
+            ELSE 0 
+        END) AS LEAVE_APPLIED,
+        -- Leave Taken (approved leaves only)
+        SUM(CASE 
+            WHEN APAE.APPROVAL_STATUS_CD IN ('APPROVED')
+            AND APAE.ABSENCE_STATUS_CD <> 'ORA_WITHDRAWN'
+            AND APAE.START_DATE <= P.EFFECTIVE_DATE
+            THEN NVL(APAE.DURATION, 0)
+            ELSE 0 
+        END) AS LEAVE_TAKEN,
+        -- Unpaid Leave Days (identify by absence type name containing 'UNPAID')
+        SUM(CASE 
+            WHEN APAE.APPROVAL_STATUS_CD IN ('APPROVED')
+            AND APAE.ABSENCE_STATUS_CD <> 'ORA_WITHDRAWN'
+            AND APAE.START_DATE <= P.EFFECTIVE_DATE
+            AND UPPER(AATFT.NAME) LIKE '%UNPAID%'
+            THEN NVL(APAE.DURATION, 0)
+            ELSE 0 
+        END) AS UNPAID_LEAVE_DAYS
+    FROM
+        ANC_PER_ABS_ENTRIES APAE,
+        ANC_ABSENCE_TYPES_F_TL AATFT,
+        PARAMETERS P
+    WHERE
+        APAE.ABSENCE_TYPE_ID = AATFT.ABSENCE_TYPE_ID
+    AND AATFT.LANGUAGE = 'US'
+    AND P.EFFECTIVE_DATE BETWEEN AATFT.EFFECTIVE_START_DATE AND AATFT.EFFECTIVE_END_DATE
+    GROUP BY 
+        APAE.PERSON_ID, 
+        APAE.PLAN_ID,
+        P.EFFECTIVE_DATE
+)
+```
+
+**Key Features:**
+- **Three Metrics**: Applied, Taken (approved), and Unpaid separately
+- **Unpaid Identification**: `UPPER(NAME) LIKE '%UNPAID%'` for flexibility
+- **Date Cutoff**: `START_DATE <= EFFECTIVE_DATE` for as-of-date accuracy
+- **Status Filtering**: Proper approval and absence status handling
+
+**Unpaid Leave Pattern:**
+```sql
+AND UPPER(AATFT.NAME) LIKE '%UNPAID%'
+```
+
+---
+
+## 15. ABSENCE_TYPES CTE
 **Purpose:** Absence type master with translations  
 **Usage:** For type classification and filtering
 
@@ -359,7 +717,7 @@ WITH PERIOD AS (
 
 ---
 
-## 10. ABSENCE_REASONS CTE
+## 16. ABSENCE_REASONS CTE
 **Purpose:** Absence reason lookup with type relationship  
 **Usage:** For reason classification in detail reports
 
@@ -391,7 +749,7 @@ WITH PERIOD AS (
 
 ---
 
-## 11. WORKFLOW_APPROVAL CTE
+## 17. WORKFLOW_APPROVAL CTE
 **Purpose:** Workflow approval history from WFTASK  
 **Usage:** For approver name and approval tracking
 
@@ -423,7 +781,7 @@ WITH PERIOD AS (
 
 ---
 
-## 12. LEAVE_HISTORY CTE (Historical Comparison)
+## 18. LEAVE_HISTORY CTE (Historical Comparison)
 **Purpose:** Historical leave summary for comparison  
 **Usage:** For "All Previous Leave Taken Records" column
 
@@ -455,423 +813,92 @@ WITH PERIOD AS (
 - LISTAGG for comma-separated history
 - Approved leaves only
 
-**Usage Example:**
-```sql
-LEFT JOIN LEAVE_HISTORY LH
-    ON LT.PERSON_ID = LH.PERSON_ID
-    AND LT.ABSENCE_TYPE_ID = LH.ABSENCE_TYPE_ID
-    AND LT.PER_ABSENCE_ENTRY_ID <> [exclude current entry if needed]
-```
-
 ---
 
-## 13. PERIOD_OF_SERVICE CTE
-**Purpose:** Employment term validation  
-**Usage:** For hire date and termination date context
+## 19. PLAN_ENROLLMENT CTE
+
+**Purpose:** Absence plan enrollment  
+**Usage:** Plan-based queries
 
 ```sql
-,PERIOD_OF_SERVICE AS (
-    /*+ qb_name(PERIOD_OF_SERVICE) */
+,PLAN_ENROLLMENT AS (
+    /*+ qb_name(PLAN_ENROLLMENT) */
     SELECT
-        PPOS.PERSON_ID,
-        PPOS.PERIOD_OF_SERVICE_ID,
-        TO_CHAR(NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START), 'DD-MM-YYYY') HIRE_DATE,
-        PPOS.DATE_START,
-        PPOS.ACTUAL_TERMINATION_DATE
+        APE.PERSON_ID,
+        APE.PLAN_ID,
+        APE.PRD_OF_SVC_ID,
+        AAPVL.NAME AS PLAN_NAME,
+        TO_CHAR(APE.START_DATE, 'DD-MM-YYYY') AS ENROLLMENT_START_DATE
     FROM
-        PER_PERIODS_OF_SERVICE PPOS
+        ANC_PER_ENROLLMENTS APE,
+        ANC_ABSENCE_PLANS_VL AAPVL,
+        PARAMETERS P
     WHERE
-        TRUNC(SYSDATE) BETWEEN PPOS.DATE_START 
-            AND NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
+        APE.PLAN_ID = AAPVL.ABSENCE_PLAN_ID
+    AND UPPER(AAPVL.NAME) LIKE '%ANNUAL%'
+    AND P.EFFECTIVE_DATE BETWEEN APE.START_DATE 
+        AND NVL(APE.END_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
 )
 ```
 
-**Key Filters:**
-- Active employment periods only (SYSDATE between start and termination)
-- Uses ORIGINAL_DATE_OF_HIRE or DATE_START for hire date
-
 ---
 
-## 14. BUSINESS_UNIT CTE
-**Purpose:** Business unit lookup  
-**Usage:** For business unit name in reports
+## 20. CARRYOVER_DETAILS CTE
+
+**Purpose:** Carryover and expiry tracking  
+**Usage:** Balance reports with carryover
 
 ```sql
-,BUSINESS_UNIT AS (
-    /*+ qb_name(BUSINESS_UNIT) */
+,CARRYOVER_DETAILS AS (
+    /*+ qb_name(CARRYOVER_DETAILS) */
     SELECT
-        HAOU.ORGANIZATION_ID BUSINESS_UNIT_ID,
-        HAOU.NAME BUSINESS_UNIT_NAME
+        APC.PERSON_ID,
+        APC.PLAN_ID,
+        APC.PRD_OF_SVC_ID,
+        -- Expired carryover
+        SUM(CASE 
+            WHEN APC.EXPIRY_DATE < P.EFFECTIVE_DATE 
+            THEN NVL(APC.CARRYOVER_BALANCE, 0)
+            ELSE 0 
+        END) AS CARRYOVER_EXPIRED,
+        MAX(APC.EXPIRY_DATE) AS CARRYOVER_EXPIRY_DATE
     FROM
-        HR_ALL_ORGANIZATION_UNITS HAOU
+        ANC_PER_CARRYOVER APC,
+        PARAMETERS P
+    WHERE
+        NVL(APC.CARRYOVER_BALANCE, 0) > 0
+    GROUP BY 
+        APC.PERSON_ID, 
+        APC.PLAN_ID, 
+        APC.PRD_OF_SVC_ID,
+        P.EFFECTIVE_DATE
 )
 ```
 
-**Simple lookup:** Links using BUSINESS_UNIT_ID from assignment
-
 ---
 
-## 15. ABSENCE_STATUS_LOOKUP CTE
-**Purpose:** Decode absence status codes to meanings  
-**Usage:** For user-friendly status display
+## 21. ENCASHMENT_DETAILS CTE
+
+**Purpose:** Leave encashment tracking  
+**Usage:** Encashment reports
 
 ```sql
-,ABSENCE_STATUS_LOOKUP AS (
-    /*+ qb_name(ABSENCE_STATUS_LOOKUP) */
+,ENCASHMENT_DETAILS AS (
+    /*+ qb_name(ENCASHMENT_DETAILS) */
     SELECT
-        HL.LOOKUP_CODE,
-        HL.MEANING STATUS_MEANING
+        APE.PERSON_ID,
+        APE.PLAN_ID,
+        SUM(NVL(APE.ENCASHMENT_AMOUNT, 0)) AS ANNUAL_LEAVE_ENCASHMENT
     FROM
-        HR_LOOKUPS HL
+        ANC_PER_ENCASHMENTS APE,
+        PARAMETERS P
     WHERE
-        HL.LOOKUP_TYPE = 'ANC_PER_ABS_ENT_STATUS'
+        APE.ENCASHMENT_DATE <= P.EFFECTIVE_DATE
+    GROUP BY 
+        APE.PERSON_ID, 
+        APE.PLAN_ID
 )
 ```
-
-**Status Types:**
-- `'ANC_PER_ABS_ENT_STATUS'` - Absence status
-- `'ANC_PER_ABS_ENT_APROVAL_STATUS'` - Approval status
-
----
-
-## 16. APPROVAL_STATUS_LOOKUP CTE
-**Purpose:** Decode approval status codes to meanings  
-**Usage:** For user-friendly approval status display
-
-```sql
-,APPROVAL_STATUS_LOOKUP AS (
-    /*+ qb_name(APPROVAL_STATUS_LOOKUP) */
-    SELECT
-        HL.LOOKUP_CODE,
-        HL.MEANING APPROVAL_MEANING
-    FROM
-        HR_LOOKUPS HL
-    WHERE
-        HL.LOOKUP_TYPE = 'ANC_PER_ABS_ENT_APROVAL_STATUS'
-)
-```
-
----
-
-## 17. FULL_EMPLOYEE_DETAILS CTE (Composite)
-**Purpose:** Complete employee record with all context  
-**Usage:** For comprehensive employee reports (combines multiple CTEs)
-
-```sql
-,FULL_EMPLOYEE_DETAILS AS (
-    /*+ qb_name(FULL_EMPLOYEE_DETAILS) */
-    SELECT
-        EM.PERSON_ID,
-        EM.PERSON_NUMBER,
-        EM.DISPLAY_NAME,
-        EM.FULL_NAME,
-        EM.EMPLOYEE_TYPE,
-        EA.ASSIGNMENT_ID,
-        EA.ASSIGNMENT_NUMBER,
-        EA.JOB_NAME,
-        EA.DEPARTMENT_NAME,
-        EA.ORG_NAME,
-        EA.BUSINESS_UNIT_ID,
-        BU.BUSINESS_UNIT_NAME,
-        SP.SUPERVISOR_NAME,
-        SP.SUPERVISOR_JOB,
-        POS.HIRE_DATE,
-        POS.PERIOD_OF_SERVICE_ID
-    FROM
-        EMP_MASTER EM,
-        EMP_ASSIGNMENT EA,
-        BUSINESS_UNIT BU,
-        SUPERVISOR SP,
-        PERIOD_OF_SERVICE POS
-    WHERE
-        EM.PERSON_ID = EA.PERSON_ID
-    AND EA.BUSINESS_UNIT_ID = BU.BUSINESS_UNIT_ID(+)
-    AND EM.PERSON_ID = SP.PERSON_ID(+)
-    AND EM.PERSON_ID = POS.PERSON_ID
-)
-```
-
-**Composite CTE:** Combines employee, assignment, supervisor, and period of service data
-
----
-
-## 18. WORKFLOW_APPROVAL_DETAIL CTE (Enhanced)
-**Purpose:** Detailed workflow approval with approver and requestor  
-**Usage:** For comprehensive approval tracking with names
-
-```sql
-,WORKFLOW_APPROVAL_DETAIL AS (
-    /*+ qb_name(WORKFLOW_APPROVAL_DETAIL) */
-    SELECT
-        WF.ASSIGNEESDISPLAYNAME APPR_NAME,
-        WF.FROMUSERDISPLAYNAME REPL_NAME,
-        WF.IDENTIFICATIONKEY
-    FROM
-        FA_FUSION_SOAINFRA.WFTASK WF
-    WHERE
-        WF.OUTCOME IN ('APPROVE')
-    AND WF.ASSIGNEES IS NOT NULL
-    AND WF.WORKFLOWPATTERN NOT IN ('AGGREGATION', 'FYI')
-)
-```
-
-**Key Features:**
-- ASSIGNEESDISPLAYNAME - Approver name
-- FROMUSERDISPLAYNAME - Requestor/Submitter name
-- Excludes aggregation and FYI patterns
-
----
-
-## 19. SALARY_ADVANCE_RECOVERY CTE
-**Purpose:** Salary advance recovery from payroll elements  
-**Usage:** For linking salary advance to leave entries
-
-```sql
-,SALARY_ADVANCE_RECOVERY AS (
-    /*+ qb_name(SALARY_ADVANCE_RECOVERY) */
-    SELECT
-        PEEF.PERSON_ID,
-        PEEV.SCREEN_ENTRY_VALUE ADVANCE_SALARY
-    FROM
-        PAY_ELEMENT_ENTRIES_F PEEF,
-        PAY_ELEMENT_ENTRY_VALUES_F PEEV,
-        PAY_INPUT_VALUES_F PIVF,
-        PAY_ELEMENT_TYPES_F PETF,
-        PER_ALL_PEOPLE_F PAPF
-    WHERE
-        PEEF.ELEMENT_ENTRY_ID = PEEV.ELEMENT_ENTRY_ID
-    AND PIVF.ELEMENT_TYPE_ID = PETF.ELEMENT_TYPE_ID
-    AND PIVF.INPUT_VALUE_ID = PEEV.INPUT_VALUE_ID
-    AND PIVF.ELEMENT_TYPE_ID = PEEF.ELEMENT_TYPE_ID
-    AND PIVF.BASE_NAME IN ('AMOUNT', 'PAY VALUE')
-    AND PETF.BASE_ELEMENT_NAME = 'SALARY ADVANCE RECOVERY RETRO'
-    AND PEEF.PERSON_ID = PAPF.PERSON_ID
-)
-```
-
-**Key Features:**
-- Links to payroll element entries
-- Filters by element type: 'SALARY ADVANCE RECOVERY RETRO'
-- Gets screen entry value for advance amount
-
----
-
-## 20. LEAVE_DETAILS_ENHANCED CTE
-**Purpose:** Enhanced leave details with workflow and reasons  
-**Usage:** For comprehensive leave detail reports
-
-```sql
-,LEAVE_DETAILS_ENHANCED AS (
-    /*+ qb_name(LEAVE_DETAILS_ENHANCED) */
-    SELECT DISTINCT
-        APAPAE.PERSON_ID,
-        AATFT.NAME L_TYPE,
-        APAPAE.PER_ABSENCE_ENTRY_ID,
-        WF.APPR_NAME,
-        WF.REPL_NAME,
-        INITCAP(TO_CHAR(APAPAE.START_DATE, 'DD-fmMON-YYYY', 'NLS_DATE_LANGUAGE = AMERICAN')) AS ACTUAL_LEAVE_START_DATE,
-        INITCAP(TO_CHAR(APAPAE.END_DATE, 'DD-fmMON-YYYY', 'NLS_DATE_LANGUAGE = AMERICAN')) AS ACTUAL_LEAVE_END_DATE,
-        APAPAE.DURATION,
-        INITCAP(TO_CHAR(APAPAE.SUBMITTED_DATE, 'DD-fmMON-YYYY', 'NLS_DATE_LANGUAGE = AMERICAN')) AS DATE_OF_LEAVE_APPLY,
-        REA.NAME ABSENCE_REASON_NAME,
-        PERIOD P
-    FROM
-        ANC_ABSENCE_TYPES_F_TL AATFT,
-        ANC_PER_ABS_ENTRIES APAPAE,
-        WORKFLOW_APPROVAL_DETAIL WF,
-        ABSENCE_REASONS REA,
-        PERIOD P
-    WHERE
-        AATFT.LANGUAGE = 'US'
-    AND AATFT.NAME IN ('Annual Leave')
-    AND AATFT.ABSENCE_TYPE_ID = APAPAE.ABSENCE_TYPE_ID(+)
-    AND TO_CHAR(APAPAE.PER_ABSENCE_ENTRY_ID) = WF.IDENTIFICATIONKEY(+)
-    AND APAPAE.ABSENCE_STATUS_CD <> ('ORA_WITHDRAWN')
-    AND TRUNC(APAPAE.START_DATE) BETWEEN 
-        TRUNC(CAST(NVL((:P_START_DATE), (SELECT MIN(START_DATE) FROM ANC_PER_ABS_ENTRIES APAPAE1 WHERE APAPAE1.PER_ABSENCE_ENTRY_ID = APAPAE.PER_ABSENCE_ENTRY_ID)) AS DATE))
-        AND TRUNC(CAST(NVL((:P_END_DATE), (LAST_DAY(SYSDATE))) AS DATE))
-    AND APAPAE.ABSENCE_TYPE_REASON_ID = REA.ABSENCE_TYPE_REASON_ID(+)
-    AND APAPAE.APPROVAL_STATUS_CD <> ('DENIED')
-)
-```
-
-**Key Features:**
-- Includes workflow approver/requestor names
-- Includes absence reason
-- Date range filtering with dynamic defaults
-- INITCAP for proper name casing
-- Formatted dates for display
-
----
-
-## 21. ANNUAL_LEAVE_BALANCE_ADVANCED CTE
-**Purpose:** Annual leave balance with UPPER case-insensitive matching  
-**Usage:** For annual leave balance queries (case-insensitive)
-
-```sql
-,ANNUAL_LEAVE_BALANCE_ADVANCED AS (
-    /*+ qb_name(ANNUAL_LEAVE_BALANCE_ADVANCED) */
-    SELECT
-        APAE.END_BAL ANU_BAL,
-        APAE.PERSON_ID,
-        APAE.PLAN_ID
-    FROM
-        ANC_PER_ACCRUAL_ENTRIES APAE,
-        ANC_ABSENCE_PLANS_VL AAPV
-    WHERE
-        APAE.PLAN_ID = AAPV.ABSENCE_PLAN_ID(+)
-    AND UPPER(AAPV.NAME) = 'ANNUAL LEAVE'
-    AND APAE.ACCRUAL_PERIOD = (
-        SELECT MAX(APA.ACCRUAL_PERIOD)
-        FROM ANC_PER_ACCRUAL_ENTRIES APA
-        WHERE APAE.PERSON_ID = APA.PERSON_ID
-        AND APA.PLAN_ID = APAE.PLAN_ID
-        AND TO_CHAR(APA.ACCRUAL_PERIOD, 'YYYY') <= TO_CHAR(SYSDATE, 'YYYY')
-    )
-)
-```
-
-**Key Features:**
-- UPPER function for case-insensitive plan name matching
-- Handles variations in plan name casing
-
----
-
-## 22. CURRENT_ABSENCE_ENTRIES CTE
-**Purpose:** Current/ongoing absence entries only  
-**Usage:** For current absence activity reports
-
-```sql
-,CURRENT_ABSENCE_ENTRIES AS (
-    /*+ qb_name(CURRENT_ABSENCE_ENTRIES) */
-    SELECT
-        ABS_ENTR.PERSON_ID,
-        ABS_TYPE.NAME ABSENCE_TYPE,
-        TO_CHAR(ABS_ENTR.START_DATE, 'DD-MM-YYYY') ABSENCE_START,
-        TO_CHAR(ABS_ENTR.END_DATE, 'DD-MM-YYYY') ABSENCE_END,
-        ABS_ENTR.START_DATE,
-        ABS_ENTR.DURATION,
-        ABS_ENTR.ABSENCE_TYPE_REASON_ID,
-        TO_CHAR(ABS_ENTR.CREATION_DATE, 'DD-MM-YYYY') SUBMITTED_DATE,
-        TO_CHAR(ABS_ENTR.LAST_UPDATE_DATE, 'DD-MM-YYYY') CONFIRMED_DATE,
-        ABS_ENTR.APPROVAL_STATUS_CD,
-        ABS_ENTR.ABSENCE_STATUS_CD
-    FROM
-        ANC_PER_ABS_ENTRIES ABS_ENTR,
-        ANC_ABSENCE_TYPES_F_TL ABS_TYPE
-    WHERE
-        ABS_ENTR.ABSENCE_TYPE_ID = ABS_TYPE.ABSENCE_TYPE_ID
-    AND ABS_TYPE.LANGUAGE = 'US'
-    AND ABS_TYPE.SOURCE_LANG = 'US'
-    AND ABS_ENTR.APPROVAL_STATUS_CD NOT IN ('DENIED', 'ORA_WITHDRAN', 'ORA_AWAIT_AWAIT')
-    AND TRUNC(SYSDATE) BETWEEN ABS_ENTR.START_DATE AND ABS_ENTR.END_DATE
-)
-```
-
-**Key Features:**
-- Filters for current absences only (SYSDATE BETWEEN START_DATE AND END_DATE)
-- SOURCE_LANG filter to prevent duplicates
-- Formatted dates for display
-
----
-
-## 23. TERMINATED_EMP_FILTER CTE
-**Purpose:** Employee filter with termination date handling  
-**Usage:** For queries including terminated employees
-
-```sql
-,TERMINATED_EMP_FILTER AS (
-    /*+ qb_name(TERMINATED_EMP_FILTER) */
-    SELECT
-        PER.PERSON_ID,
-        PER.FULL_NAME,
-        ASSI_NEW.ASSIGNMENT_NUMBER,
-        ASSI_NEW.ORGANIZATION_ID,
-        ASSI_NEW.BUSINESS_UNIT_ID,
-        ASSI_NEW.PERIOD_OF_SERVICE_ID,
-        PPOS.ACTUAL_TERMINATION_DATE
-    FROM
-        PER_PERSON_NAMES_F PER,
-        PER_ALL_ASSIGNMENTS_F ASSI_NEW,
-        PER_ALL_PEOPLE_F PAPF,
-        PER_PERIODS_OF_SERVICE PPOS,
-        PER_PERSON_TYPES_TL PPTTL,
-        PER_PEOPLE_LEGISLATIVE_F PPLF
-    WHERE
-        PER.PERSON_ID = ASSI_NEW.PERSON_ID
-    AND PAPF.PERSON_ID = ASSI_NEW.PERSON_ID
-    AND ASSI_NEW.PRIMARY_FLAG = 'Y'
-    AND ASSI_NEW.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
-    AND PER.NAME_TYPE = 'GLOBAL'
-    AND PPOS.PERSON_ID = PER.PERSON_ID
-    AND PPOS.PERIOD_OF_SERVICE_ID = ASSI_NEW.PERIOD_OF_SERVICE_ID
-    AND ASSI_NEW.ASSIGNMENT_TYPE = 'E'
-    AND PPLF.PERSON_ID = PAPF.PERSON_ID
-    AND PPTTL.PERSON_TYPE_ID = ASSI_NEW.PERSON_TYPE_ID
-    AND PPTTL.LANGUAGE = 'US'
-    AND PPTTL.SOURCE_LANG = 'US'
-    AND TRUNC(SYSDATE) BETWEEN PPOS.DATE_START AND NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
-    AND LEAST(NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY')), TRUNC(SYSDATE))
-        BETWEEN PER.EFFECTIVE_START_DATE AND PER.EFFECTIVE_END_DATE
-    AND LEAST(NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY')), TRUNC(SYSDATE))
-        BETWEEN ASSI_NEW.EFFECTIVE_START_DATE AND ASSI_NEW.EFFECTIVE_END_DATE
-    AND LEAST(NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY')), TRUNC(SYSDATE))
-        BETWEEN PPLF.EFFECTIVE_START_DATE AND PPLF.EFFECTIVE_END_DATE
-    AND LEAST(NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY')), TRUNC(SYSDATE))
-        BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
-)
-```
-
-**Key Features:**
-- Uses LEAST function for date-track filtering with termination dates
-- Handles both active and terminated employees
-- Includes period of service validation
-- Includes legislative data filter
-
----
-
-## 24. ACCRUAL_BALANCE_CURRENT_YEAR CTE
-**Purpose:** Accrual balance for current year only  
-**Usage:** For year-specific balance queries
-
-```sql
-,ACCRUAL_BALANCE_CURRENT_YEAR AS (
-    /*+ qb_name(ACCRUAL_BALANCE_CURRENT_YEAR) */
-    SELECT
-        PAPF.PERSON_ID,
-        SUM(APAE.END_BAL) ACCRUAL_BAL
-    FROM
-        PER_ALL_PEOPLE_F PAPF,
-        ANC_PER_ACCRUAL_ENTRIES APAE,
-        ANC_ABSENCE_PLANS_F_TL AAPFTL,
-        PER_PERIODS_OF_SERVICE PPOS
-    WHERE
-        PAPF.PERSON_ID = APAE.PERSON_ID
-    AND APAE.PRD_OF_SVC_ID = PPOS.PERIOD_OF_SERVICE_ID
-    AND APAE.PLAN_ID = AAPFTL.ABSENCE_PLAN_ID
-    AND AAPFTL.SOURCE_LANG = 'US'
-    AND AAPFTL.LANGUAGE = 'US'
-    AND AAPFTL.NAME = 'Annual Leave Plan'
-    AND TRUNC(SYSDATE) BETWEEN AAPFTL.EFFECTIVE_START_DATE AND AAPFTL.EFFECTIVE_END_DATE
-    AND APAE.ACCRUAL_PERIOD = (
-        SELECT MAX(ACC.ACCRUAL_PERIOD)
-        FROM ANC_PER_ACCRUAL_ENTRIES ACC
-        WHERE ACC.PERSON_ID = APAE.PERSON_ID
-        AND APAE.PLAN_ID = ACC.PLAN_ID
-        AND APAE.PRD_OF_SVC_ID = ACC.PRD_OF_SVC_ID
-        AND ACC.ACCRUAL_PERIOD BETWEEN 
-            TO_DATE('01/01/' || TO_CHAR(TRUNC(SYSDATE), 'YYYY'), 'DD/MM/YYYY') 
-            AND TO_DATE('31/12/' || TO_CHAR(TRUNC(SYSDATE), 'YYYY'), 'DD/MM/YYYY')
-    )
-    GROUP BY PAPF.PERSON_ID
-)
-```
-
-**Key Features:**
-- Current year filter on accrual period
-- SUM aggregation for total balance
-- SOURCE_LANG and LANGUAGE filters
-- Period of service validation
 
 ---
 
@@ -896,47 +923,24 @@ WHERE
     EM.PERSON_ID = LT.PERSON_ID
 ```
 
-### Pattern 2: Leave Balance Query
+### Pattern 2: Comprehensive Balance Report
 ```sql
-WITH PERIOD AS (...),
-     FULL_EMPLOYEE_DETAILS AS (...),
-     ANNUAL_LEAVE_BALANCE AS (...)
+WITH PARAMETERS AS (...),
+     EMP_BASE AS (...),
+     EMP_ASSIGNMENT AS (...),
+     ACCRUAL_BALANCE AS (...),
+     LEAVE_TRANSACTIONS AS (...)
 SELECT
-    FED.PERSON_NUMBER,
-    FED.DISPLAY_NAME,
-    FED.DEPARTMENT_NAME,
-    NVL(ROUND(ALB.ANU_BAL, 2), 0) ANNUAL_LEAVE_BALANCE
-FROM
-    FULL_EMPLOYEE_DETAILS FED,
-    ANNUAL_LEAVE_BALANCE ALB
-WHERE
-    FED.PERSON_ID = ALB.PERSON_ID(+)
-```
-
-### Pattern 3: Leave History with Comparison
-```sql
-WITH PERIOD AS (...),
-     EMP_MASTER AS (...),
-     LEAVE_TRANSACTIONS AS (...),
-     LEAVE_HISTORY AS (...)
-SELECT
-    EM.PERSON_NUMBER,
-    LT.LEAVE_TYPE,
-    LT.START_DATE_DISPLAY,
-    LT.DURATION,
-    CASE 
-        WHEN LH.PREVIOUS_COUNT > 0 THEN 'Full Leave History'
-        ELSE 'New Leave Request'
-    END AS HISTORY_TYPE,
-    NVL(LH.PREVIOUS_DETAILS, 'None') PREVIOUS_LEAVE_RECORDS
-FROM
-    EMP_MASTER EM,
-    LEAVE_TRANSACTIONS LT,
-    LEAVE_HISTORY LH
-WHERE
-    EM.PERSON_ID = LT.PERSON_ID
-AND LT.PERSON_ID = LH.PERSON_ID(+)
-AND LT.ABSENCE_TYPE_ID = LH.ABSENCE_TYPE_ID(+)
+    EB.PERSON_NUMBER,
+    EB.FULL_NAME,
+    AB.PY_CARRY_FORWARD,
+    AB.CY_ACCRUED,
+    LT.LEAVE_TAKEN,
+    (AB.PY_CARRY_FORWARD + AB.CY_ACCRUED - LT.LEAVE_TAKEN) AS BALANCE
+FROM EMP_BASE EB
+    JOIN EMP_ASSIGNMENT EA ON EB.PERSON_ID = EA.PERSON_ID
+    LEFT JOIN ACCRUAL_BALANCE AB ON EB.PERSON_ID = AB.PERSON_ID
+    LEFT JOIN LEAVE_TRANSACTIONS LT ON EB.PERSON_ID = LT.PERSON_ID
 ```
 
 ---
@@ -951,6 +955,9 @@ Before using any CTE from this repository:
 - [ ] `LANGUAGE = 'US'` applied to `_TL` tables ✓
 - [ ] Status filters applied (approved, not withdrawn) ✓
 - [ ] Outer joins (+) used where appropriate ✓
+- [ ] PARAMETERS CTE uses UPPER() for case-insensitive comparison ✓
+- [ ] Date filtering uses P.EFFECTIVE_DATE (not SYSDATE) where required ✓
+- [ ] All components use NVL() to prevent NULL arithmetic ✓
 
 ---
 
@@ -959,9 +966,14 @@ Before using any CTE from this repository:
 1. **DO NOT modify these CTEs** without understanding the constraints from ABSENCE_MASTER.md
 2. **ALWAYS copy complete CTEs** - do not write fresh joins
 3. **Test workflow CTEs** in your environment - FA_FUSION_SOAINFRA may require special access
-4. **Combine CTEs efficiently** - use composite CTEs like FULL_EMPLOYEE_DETAILS to reduce redundancy
+4. **Use Enhanced CTEs** when additional features (service calculation, FT/PT, unpaid tracking) are needed
+5. **Document DFF Mappings** - run discovery query and update EMP_DFF CTE accordingly
 
 ---
 
 **END OF ABSENCE_REPOSITORIES.md**
 
+**Status:** Merged and Complete  
+**Last Merged:** 07-Jan-2026  
+**Source Files:** ABSENCE_REPOSITORIES.md + ABSENCE_REPOSITORIES_UPDATE_31-12-25.md  
+**Version:** 2.0

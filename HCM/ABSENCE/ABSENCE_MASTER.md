@@ -3,7 +3,8 @@
 **Module:** HCM Absence Management  
 **Tag:** `#HCM #ABSENCE #LEAVE #TIMEOFF`  
 **Status:** Active  
-**Date:** 18-12-25
+**Last Updated:** 07-Jan-2026  
+**Version:** 2.0 (Merged with update file)
 
 ---
 
@@ -79,6 +80,52 @@ AND TRUNC(SYSDATE) BETWEEN PPOS.DATE_START
 ```
 **Why:** Links absence to valid employment term.  
 **Scope:** Queries involving employment history
+
+### 1.8 Effective Date Parameter (NEW)
+**Rule:** Always use parameter date for date-track filtering (not SYSDATE)  
+**Pattern:**
+```sql
+-- Define parameter
+TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY'))
+
+-- Apply to all date-tracked tables
+AND P.EFFECTIVE_DATE BETWEEN TABLE.EFFECTIVE_START_DATE AND TABLE.EFFECTIVE_END_DATE
+
+-- For accrual periods
+AND APAE.ACCRUAL_PERIOD <= P.EFFECTIVE_DATE
+
+-- For transactions
+AND APAE.START_DATE <= P.EFFECTIVE_DATE
+```
+
+**Why:** Enables "as of" date queries for accurate historical reporting  
+**Scope:** All queries requiring point-in-time accuracy
+
+**Benefits:**
+- Historical queries: Run report as of any past date
+- Consistency: All data reflects same point in time
+- Audit support: Recreate exact report as it appeared
+- Comparison: Run for different dates to compare changes
+
+### 1.9 Case-Insensitive Filtering (NEW)
+**Rule:** Apply UPPER() to text parameters for case-insensitive comparison  
+**Pattern:**
+```sql
+-- In PARAMETERS CTE
+UPPER(NVL(:P_PARAMETER, 'ALL'))
+
+-- In WHERE clause
+UPPER(field) = P.PARAMETER OR P.PARAMETER = 'ALL'
+```
+
+**Why:** User doesn't need to match exact case, improves usability  
+**Scope:** All text-based parameter filters
+
+**Example:**
+```
+User enters: "abc corporation llc"
+Matches: "ABC CORPORATION LLC", "Abc Corporation LLC", "ABC Corporation Llc"
+```
 
 ---
 
@@ -205,6 +252,26 @@ AND WF.WORKFLOWPATTERN NOT IN ('AGGREGATION', 'FYI')
 AND TO_CHAR(APAE.PER_ABSENCE_ENTRY_ID) = WF.IDENTIFICATIONKEY(+)
 ```
 
+### 4.6 Multi-Parameter Filter (NEW)
+```sql
+-- Multi-parameter with 'ALL' support
+AND (UPPER(field1) = P.PARAM1 OR P.PARAM1 = 'ALL')
+AND (UPPER(field2) = P.PARAM2 OR P.PARAM2 = 'ALL')
+AND (UPPER(field3) = P.PARAM3 OR P.PARAM3 = 'ALL')
+```
+
+### 4.7 Effective Date Filter (NEW)
+```sql
+-- Use parameter date instead of SYSDATE
+AND P.EFFECTIVE_DATE BETWEEN TABLE.EFFECTIVE_START_DATE AND TABLE.EFFECTIVE_END_DATE
+
+-- For accrual periods
+AND APAE.ACCRUAL_PERIOD <= P.EFFECTIVE_DATE
+
+-- For transactions
+AND APAE.START_DATE <= P.EFFECTIVE_DATE
+```
+
 ---
 
 ## 5. 🔐 Business Rules
@@ -258,6 +325,235 @@ AND APAE_HIST.APPROVAL_STATUS_CD = 'APPROVED'
 AND APAE_HIST.START_DATE < [Current.START_DATE]
 ```
 
+### 5.7 Service Calculation (NEW)
+**Rule:** Use MONTHS_BETWEEN() / 12 for accurate service year calculation  
+**Formula:** `ROUND(MONTHS_BETWEEN(EFFECTIVE_DATE, HIRE_DATE) / 12, 2)`
+
+**Implementation:**
+```sql
+ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, 
+    NVL(PPOS.ORIGINAL_DATE_OF_HIRE, PPOS.DATE_START)) / 12, 2) AS SERVICE_IN_YEARS
+```
+
+**Why:** Accurate to day-level precision, handles leap years correctly  
+**Scope:** When service duration is required in reports
+
+**Considerations:**
+- Use ORIGINAL_DATE_OF_HIRE if available, else DATE_START
+- ROUND to 2 decimal places for readability
+- Use Effective Date (not SYSDATE) for consistency
+
+### 5.8 Full Time / Part Time Classification (NEW)
+**Rule:** Use NORMAL_HOURS from assignment to classify employees  
+**Pattern:**
+```sql
+CASE 
+    WHEN NVL(PAAF.NORMAL_HOURS, 0) >= 40 THEN 'Full Time'
+    WHEN NVL(PAAF.NORMAL_HOURS, 0) > 0 AND NVL(PAAF.NORMAL_HOURS, 0) < 40 THEN 'Part Time'
+    ELSE 'Not Specified'
+END AS FULL_TIME_PART_TIME
+```
+
+**Why:** Standardized classification for reporting  
+**Scope:** When FT/PT status is required  
+**Note:** Adjust threshold (40 hours) based on organizational policy
+
+**Customization Examples:**
+```sql
+-- For 35-hour workweek
+WHEN NVL(PAAF.NORMAL_HOURS, 0) >= 35 THEN 'Full Time'
+
+-- For specific categories
+CASE 
+    WHEN NVL(PAAF.NORMAL_HOURS, 0) >= 40 THEN 'Full Time'
+    WHEN NVL(PAAF.NORMAL_HOURS, 0) >= 20 AND < 40 THEN 'Part Time'
+    WHEN NVL(PAAF.NORMAL_HOURS, 0) > 0 AND < 20 THEN 'Casual'
+    ELSE 'Not Specified'
+END
+```
+
+### 5.9 Accrual Year Breakdown (NEW)
+**Rule:** Split accrual balance into PY (Previous Year) and CY (Current Year) components  
+**Pattern:**
+```sql
+-- Previous Year Carry Forward
+SUM(CASE 
+    WHEN TO_CHAR(APAE.ACCRUAL_PERIOD, 'YYYY') < TO_CHAR(P.EFFECTIVE_DATE, 'YYYY')
+    THEN NVL(APAE.END_BAL, 0)
+    ELSE 0 
+END) AS PY_CARRY_FORWARD
+
+-- Current Year Accrued
+SUM(CASE 
+    WHEN TO_CHAR(APAE.ACCRUAL_PERIOD, 'YYYY') = TO_CHAR(P.EFFECTIVE_DATE, 'YYYY')
+    THEN NVL(APAE.ACCRUAL_BALANCE, 0)
+    ELSE 0 
+END) AS CY_ACCRUED
+```
+
+**Why:** Required for leave balance reporting and compliance  
+**Scope:** Leave balance reports requiring carryover tracking
+
+**Key Points:**
+- Use TO_CHAR(date, 'YYYY') for year comparison
+- PY uses END_BAL (cumulative balance from prior year)
+- CY uses ACCRUAL_BALANCE (accrued in current year)
+- Both filter ACCRUAL_PERIOD <= EFFECTIVE_DATE
+
+### 5.10 Unpaid Leave Tracking (NEW)
+**Rule:** Track unpaid leave separately using absence type name pattern  
+**Pattern:** `UPPER(AATFT.NAME) LIKE '%UNPAID%'`
+
+**Implementation:**
+```sql
+-- Unpaid leave taken
+SUM(CASE 
+    WHEN APAE.APPROVAL_STATUS_CD = 'APPROVED'
+    AND APAE.ABSENCE_STATUS_CD <> 'ORA_WITHDRAWN'
+    AND UPPER(AATFT.NAME) LIKE '%UNPAID%'
+    THEN NVL(APAE.DURATION, 0)
+END) AS UNPAID_LEAVE_DAYS
+```
+
+**Why:** Unpaid leave affects entitlement calculations differently  
+**Scope:** Leave transaction queries requiring unpaid leave separation
+
+**Alternative Patterns:**
+```sql
+-- By category
+AND AATFT.ABSENCE_CATEGORY = 'UNPAID'
+
+-- By type code
+AND AATFT.ABSENCE_TYPE_CODE LIKE '%UNPAID%'
+
+-- By plan type
+AND AAPV.PLAN_TYPE = 'UNPAID_LEAVE'
+```
+
+### 5.11 DFF Attribute Mapping (NEW)
+**Rule:** Create separate CTE for DFF attribute to business field mapping  
+**Pattern:**
+```sql
+-- Step 1: Expose in EMP_ASSIGNMENT
+,EMP_ASSIGNMENT AS (
+    SELECT
+        PAAF.PERSON_ID,
+        PAAF.ATTRIBUTE1,
+        PAAF.ATTRIBUTE2,
+        PAAF.ATTRIBUTE3,
+        PAAF.ATTRIBUTE4,
+        PAAF.ATTRIBUTE5
+        -- ... other columns
+    FROM PER_ALL_ASSIGNMENTS_F PAAF
+)
+
+-- Step 2: Map in EMP_DFF
+,EMP_DFF AS (
+    /*+ qb_name(EMP_DFF) */
+    SELECT
+        EA.PERSON_ID,
+        -- Map DFF attributes to business fields
+        EA.ATTRIBUTE1 AS CONTRACT_TYPE,
+        EA.ATTRIBUTE5 AS CLIENT_JOB_TITLE,
+        EA.ATTRIBUTE3 AS PROJECT_NUMBER,
+        EA.ATTRIBUTE4 AS SERVICE_LINE
+    FROM EMP_ASSIGNMENT EA
+)
+```
+
+**Why:** Isolates DFF logic for easy maintenance and updates  
+**Scope:** When DFF fields are required in reports
+
+**Discovery Query:**
+```sql
+SELECT 
+    APPLICATION_COLUMN_NAME,
+    END_USER_COLUMN_NAME
+FROM FND_DESCR_FLEX_COLUMN_USAGES
+WHERE APPLICATION_TABLE_NAME = 'PER_ALL_ASSIGNMENTS_F'
+AND ENABLED_FLAG = 'Y'
+```
+
+### 5.12 Multi-Parameter Filtering (NEW)
+**Rule:** Implement independent optional filters with 'ALL' bypass  
+**Pattern:** `(UPPER(field) = P.PARAMETER OR P.PARAMETER = 'ALL')`
+
+**Implementation:**
+```sql
+-- In PARAMETERS CTE: Default to 'ALL'
+WITH PARAMETERS AS (
+    SELECT
+        UPPER(NVL(:P_LEGAL_EMPLOYER, 'ALL')) AS LEGAL_EMPLOYER,
+        UPPER(NVL(:P_ABSENCE_PLAN, 'ALL')) AS ABSENCE_PLAN,
+        UPPER(NVL(:P_JOB_TITLE, 'ALL')) AS JOB_TITLE
+    FROM DUAL
+)
+
+-- In WHERE clause: Apply 'OR = ALL' pattern
+WHERE
+    (UPPER(EA.LEGAL_EMPLOYER_NAME) = P.LEGAL_EMPLOYER OR P.LEGAL_EMPLOYER = 'ALL')
+AND (UPPER(PE.PLAN_NAME) = P.ABSENCE_PLAN OR P.ABSENCE_PLAN = 'ALL')
+AND (UPPER(EA.JOB_TITLE) = P.JOB_TITLE OR P.JOB_TITLE = 'ALL')
+```
+
+**Why:** Allows flexible filtering without complex NULL handling  
+**Scope:** Reports with multiple independent filter parameters
+
+**Benefits:**
+- Each filter works independently
+- No NULL handling needed (defaulted to 'ALL')
+- Case-insensitive matching
+- Clear, readable syntax
+
+### 5.13 Balance Calculation Pattern (NEW)
+**Rule:** Display all balance components separately PLUS calculated total  
+**Formula:** `PY + CY + Adj - Enc - Taken - Expired = Balance`
+
+**Implementation:**
+```sql
+SELECT
+    -- Individual Components (visible)
+    NVL(AB.PY_CARRY_FORWARD, 0) AS "PY Leave Carried Forward (Days)",
+    NVL(AB.CY_ACCRUED, 0) AS "CY Leave Accrued (Days)",
+    NVL(AB.BALANCE_ADJUSTMENT, 0) AS "Annual leave balance adjustment",
+    NVL(EN.ANNUAL_LEAVE_ENCASHMENT, 0) AS "Annual leave encashment",
+    NVL(LT.LEAVE_TAKEN, 0) AS "Leave Taken",
+    NVL(CD.CARRYOVER_EXPIRED, 0) AS "Carryover Expired (days)",
+    
+    -- Calculated Balance (formula)
+    (
+        NVL(AB.PY_CARRY_FORWARD, 0) 
+        + NVL(AB.CY_ACCRUED, 0) 
+        + NVL(AB.BALANCE_ADJUSTMENT, 0) 
+        - NVL(EN.ANNUAL_LEAVE_ENCASHMENT, 0) 
+        - NVL(LT.LEAVE_TAKEN, 0) 
+        - NVL(CD.CARRYOVER_EXPIRED, 0)
+    ) AS "Calc. Leave Balance"
+FROM ...
+```
+
+**Why:** Transparency, audit trail, verification capability  
+**Scope:** Any balance calculation query
+
+**Components:**
+- PY Carry Forward (from prior years)
+- CY Accrued (current year)
+- Adjustments (manual changes)
+- Encashment (paid out)
+- Leave Taken (used)
+- Carryover Expired (lapsed)
+
+**Validation Query:**
+```sql
+SELECT 
+    PERSON_NUMBER,
+    (PY + CY + ADJ - ENC - TAKEN - EXPIRED) AS MANUAL_CALC,
+    CALCULATED_BALANCE AS QUERY_CALC,
+    MANUAL_CALC - QUERY_CALC AS DIFFERENCE
+FROM result_table
+WHERE ABS(MANUAL_CALC - QUERY_CALC) > 0.01
+```
+
 ---
 
 ## 6. 🎯 Report-Specific Rules
@@ -305,6 +601,31 @@ AND APAE_HIST.START_DATE < [Current.START_DATE]
 - Employee Login ID for signature
 - Manager name and details
 
+### 6.4 Comprehensive Leave Balance Report (NEW)
+**Purpose:** Complete balance report with all components  
+**Key Columns:**
+- All employee and organizational details
+- Service in years calculation
+- FT/PT classification
+- Balance component breakdown (PY, CY, Adj, Enc, Taken, Expired)
+- Calculated total balance
+
+**Filters:**
+- Effective Date (mandatory)
+- Multiple optional filters (Legal Employer, Plan, Job, Type, Location)
+- All filters case-insensitive with 'ALL' bypass
+
+**Calculations:**
+- Service in Years: `ROUND(MONTHS_BETWEEN(EFFECTIVE_DATE, HIRE_DATE) / 12, 2)`
+- FT/PT: Based on NORMAL_HOURS >= 40
+- Balance: `PY + CY + Adj - Enc - Taken - Expired`
+
+**Special Handling:**
+- DFF attribute mapping
+- Optional tables (carryover, encashment)
+- Unpaid leave tracking
+- PY/CY year breakdown
+
 ---
 
 ## 7. ⚠️ Common Pitfalls
@@ -334,7 +655,7 @@ WHERE PAPF.PERSON_ID = PAAF.PERSON_ID
 AND PAAF.PERSON_TYPE_ID = PPTTL.PERSON_TYPE_ID(+)
 ```
 
-### 7.2 Missing Balances
+### 7.3 Missing Balances
 **Problem:** NULL or zero balances  
 **Causes:**
 - Not filtering for MAX(ACCRUAL_PERIOD)
@@ -343,7 +664,7 @@ AND PAAF.PERSON_TYPE_ID = PPTTL.PERSON_TYPE_ID(+)
 
 **Solution:** Use MAX subquery pattern from Section 1.5
 
-### 7.3 Workflow Data Issues
+### 7.4 Workflow Data Issues
 **Problem:** Missing approver names  
 **Causes:**
 - `FA_FUSION_SOAINFRA.WFTASK` is a cross-schema view
@@ -352,7 +673,7 @@ AND PAAF.PERSON_TYPE_ID = PPTTL.PERSON_TYPE_ID(+)
 
 **Solution:** Use outer join and handle NULLs gracefully
 
-### 7.4 Organization Hierarchy
+### 7.5 Organization Hierarchy
 **Problem:** Missing department names  
 **Causes:**
 - Complex date-tracked joins across 3+ tables
@@ -360,7 +681,7 @@ AND PAAF.PERSON_TYPE_ID = PPTTL.PERSON_TYPE_ID(+)
 
 **Solution:** Use pre-validated DEPARTMENTS CTE from repository
 
-### 7.5 Plan Name Case Sensitivity
+### 7.6 Plan Name Case Sensitivity
 **Problem:** Leave balances not found due to case sensitivity  
 **Causes:**
 - Plan names may be stored with different casing
@@ -371,7 +692,7 @@ AND PAAF.PERSON_TYPE_ID = PPTTL.PERSON_TYPE_ID(+)
 AND UPPER(AAPV.NAME) = 'ANNUAL LEAVE'
 ```
 
-### 7.6 Terminated Employee Date Filtering
+### 7.7 Terminated Employee Date Filtering
 **Problem:** Incorrect date-track filtering for terminated employees  
 **Causes:**
 - Standard SYSDATE filter doesn't work for terminated employees
@@ -383,7 +704,7 @@ AND LEAST(NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
     BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
 ```
 
-### 7.7 Source Language vs Language
+### 7.8 Source Language vs Language
 **Problem:** Duplicate rows when using `_F_TL` tables  
 **Causes:**
 - Missing `SOURCE_LANG` filter
@@ -394,6 +715,75 @@ AND LEAST(NVL(PPOS.ACTUAL_TERMINATION_DATE, TO_DATE('31/12/4712', 'DD/MM/YYYY'))
 AND AAPFTL.SOURCE_LANG = 'US'
 AND AAPFTL.LANGUAGE = 'US'
 ```
+
+### 7.9 Using SYSDATE Instead of Parameter Date (NEW)
+**Problem:** Using SYSDATE for date-track filtering in historical queries  
+**Cause:** Default pattern uses SYSDATE, but historical queries need parameter date
+
+**Solution:**
+```sql
+-- WRONG: Using SYSDATE
+AND SYSDATE BETWEEN TABLE.EFFECTIVE_START_DATE AND TABLE.EFFECTIVE_END_DATE
+
+-- CORRECT: Using parameter date
+AND P.EFFECTIVE_DATE BETWEEN TABLE.EFFECTIVE_START_DATE AND TABLE.EFFECTIVE_END_DATE
+```
+
+**Impact:** Historical queries return incorrect data, audit reports are inaccurate
+
+### 7.10 Case-Sensitive Parameter Matching (NEW)
+**Problem:** Parameter filters don't work due to case mismatch  
+**Cause:** Direct string comparison without UPPER()
+
+**Solution:**
+```sql
+-- WRONG: Case-sensitive
+WHERE EA.LEGAL_EMPLOYER_NAME = P.LEGAL_EMPLOYER
+
+-- CORRECT: Case-insensitive
+WHERE UPPER(EA.LEGAL_EMPLOYER_NAME) = P.LEGAL_EMPLOYER
+```
+
+### 7.11 Missing NVL() in Balance Calculations (NEW)
+**Problem:** Balance calculation returns NULL due to NULL arithmetic  
+**Cause:** Any NULL component makes entire calculation NULL
+
+**Solution:**
+```sql
+-- WRONG: NULL-prone
+SELECT (PY + CY + ADJ - ENC - TAKEN - EXPIRED) AS BALANCE
+
+-- CORRECT: NVL-protected
+SELECT (
+    NVL(PY, 0) + NVL(CY, 0) + NVL(ADJ, 0) 
+    - NVL(ENC, 0) - NVL(TAKEN, 0) - NVL(EXPIRED, 0)
+) AS BALANCE
+```
+
+### 7.12 Optional Table Handling (NEW)
+**Rule:** Use outer joins and comments for optional tables  
+**Pattern:**
+```sql
+-- ============================================================================
+-- CARRYOVER DETAILS (Optional - comment out if table doesn't exist)
+-- ============================================================================
+,CARRYOVER_DETAILS AS (
+    /*+ qb_name(CARRYOVER_DETAILS) */
+    SELECT ...
+)
+
+-- In final SELECT: Use outer join and NVL
+SELECT
+    NVL(CD.CARRYOVER_EXPIRED, 0) AS "Carryover Expired (days)"
+FROM
+    EMP_BASE EB,
+    CARRYOVER_DETAILS CD
+WHERE
+    EB.PERSON_ID = CD.PERSON_ID(+)
+```
+
+**Why:** Query works in environments with or without optional tables  
+**Scope:** Carryover, encashment, or other optional absence tables
 
 ---
 
@@ -584,6 +974,44 @@ AND (SELECT HL.MEANING
 AND APAE.ABSENCE_TYPE_REASON_ID = REA.ABSENCE_TYPE_REASON_ID(+)
 ```
 
+### 9.7 Service Duration Calculation (NEW)
+**Purpose:** Calculate accurate service years for entitlement  
+**Pattern:**
+```sql
+ROUND(MONTHS_BETWEEN(EFFECTIVE_DATE, 
+    NVL(ORIGINAL_DATE_OF_HIRE, DATE_START)) / 12, 2) AS SERVICE_IN_YEARS
+```
+
+### 9.8 Year-Based Accrual Breakdown (NEW)
+**Purpose:** Separate PY and CY accruals  
+**Pattern:**
+```sql
+-- Previous Year
+SUM(CASE 
+    WHEN TO_CHAR(ACCRUAL_PERIOD, 'YYYY') < TO_CHAR(EFFECTIVE_DATE, 'YYYY')
+    THEN NVL(END_BAL, 0)
+    ELSE 0 
+END) AS PY_CARRY_FORWARD
+
+-- Current Year
+SUM(CASE 
+    WHEN TO_CHAR(ACCRUAL_PERIOD, 'YYYY') = TO_CHAR(EFFECTIVE_DATE, 'YYYY')
+    THEN NVL(ACCRUAL_BALANCE, 0)
+    ELSE 0 
+END) AS CY_ACCRUED
+```
+
+### 9.9 FT/PT Classification Logic (NEW)
+**Purpose:** Standardized employee time classification  
+**Pattern:**
+```sql
+CASE 
+    WHEN NVL(NORMAL_HOURS, 0) >= 40 THEN 'Full Time'
+    WHEN NVL(NORMAL_HOURS, 0) > 0 AND NVL(NORMAL_HOURS, 0) < 40 THEN 'Part Time'
+    ELSE 'Not Specified'
+END AS FULL_TIME_PART_TIME
+```
+
 ---
 
 ## 10. 🔄 Integration Points
@@ -611,6 +1039,7 @@ AND APAE.ABSENCE_TYPE_REASON_ID = REA.ABSENCE_TYPE_REASON_ID(+)
 
 Before finalizing any Absence Management query, verify:
 
+**Core Constraints:**
 - [ ] Date-track filter applied to all `_F` tables
 - [ ] `LANGUAGE = 'US'` applied to all `_TL` tables
 - [ ] Approval status filter applied (exclude DENIED, WITHDRAWN)
@@ -622,6 +1051,43 @@ Before finalizing any Absence Management query, verify:
 - [ ] Date formatting uses `INITCAP(TO_CHAR(..., 'DD-fmMON-YYYY'))`
 - [ ] Parameters handle NULL with NVL or default values
 - [ ] All joins use outer join (+) where appropriate
+
+**NEW Pattern Checks:**
+- [ ] Effective Date parameter used (not SYSDATE) for date-track filtering
+- [ ] All text parameters use UPPER() for case-insensitive comparison
+- [ ] Service calculation uses MONTHS_BETWEEN() / 12 pattern
+- [ ] FT/PT classification based on NORMAL_HOURS (threshold documented)
+- [ ] Accrual balance split by year (PY vs CY) if required
+- [ ] Unpaid leave identified separately if required
+- [ ] Multi-parameter filters use 'OR = ALL' pattern
+- [ ] Balance calculation displays all components + total
+- [ ] All components use NVL() to prevent NULL arithmetic
+- [ ] Optional tables handled with outer joins and comments
+- [ ] DFF attributes mapped in separate CTE with discovery query documented
+
+---
+
+## 📊 PATTERN PRIORITY
+
+**Critical Patterns** (Must Use):
+1. Effective Date filtering (not SYSDATE)
+2. Date-track filtering on all `_F` tables
+3. LANGUAGE = 'US' on all `_TL` tables
+4. Active assignment filters
+5. NVL() in calculations
+
+**High Priority Patterns** (Strongly Recommended):
+1. Case-insensitive parameter filtering
+2. Multi-parameter 'ALL' bypass
+3. Service calculation standard formula
+4. Balance component breakdown
+
+**Medium Priority Patterns** (Use When Applicable):
+1. FT/PT classification
+2. PY/CY accrual breakdown
+3. Unpaid leave tracking
+4. DFF attribute mapping
+5. Optional table handling
 
 ---
 
@@ -636,6 +1102,7 @@ This ABSENCE_MASTER document contains:
 - Business rules for calculations
 - Report-specific requirements
 - Common pitfalls and solutions
+- NEW patterns from Employee Annual Leave Balance Report
 - Self-validation checklist
 
 **Usage:** Review this document BEFORE generating any absence/leave SQL. Apply all constraints and patterns.
@@ -646,3 +1113,7 @@ This ABSENCE_MASTER document contains:
 
 **END OF ABSENCE_MASTER.md**
 
+**Status:** Merged and Complete  
+**Last Merged:** 07-Jan-2026  
+**Source Files:** ABSENCE_MASTER.md + ABSENCE_MASTER_UPDATE_31-12-25.md  
+**Version:** 2.0
