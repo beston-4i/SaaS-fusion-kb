@@ -19,6 +19,15 @@
 3.  **Multi-Tenant Constraint:**
     *   **ALWAYS** include `ORG_ID` or `BU_ID` in joins (e.g., `AND T1.ORG_ID = T2.ORG_ID`).
     *   **NEVER** assume a Single-Org environment.
+4.  **🚫 AMPERSAND CONSTRAINT (CRITICAL):**
+    *   **NEVER** use ampersand (&) symbol **ANYWHERE** in SQL queries.
+    *   **NOT EVEN IN COMMENTS** - Ampersand triggers lexical parameter prompts in Oracle BI Tools.
+    *   **ALWAYS** use the word "AND" instead of "&".
+    *   **Examples:**
+        *   ❌ WRONG: `-- Currency & Amounts`
+        *   ✅ CORRECT: `-- Currency AND Amounts`
+        *   ❌ WRONG: `-- PROJECT & INTERCOMPANY`
+        *   ✅ CORRECT: `-- PROJECT AND INTERCOMPANY`
 
 ---
 

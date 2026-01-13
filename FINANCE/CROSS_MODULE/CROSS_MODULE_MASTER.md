@@ -12,6 +12,11 @@
     *   **Rule:** Use `XLA_*` tables to link subledger transactions to GL
     *   **Application IDs:** AP=200, AR=222, FA=140, GL=101
     *   **Pattern:** `XLA_TRANSACTION_ENTITIES` → `XLA_EVENTS` → `XLA_AE_HEADERS` → `XLA_AE_LINES`
+    *   **CRITICAL - XLA_AE_HEADERS Status Column:**
+        *   **Correct Column:** `XLA_AE_HEADERS.ACCOUNTING_ENTRY_STATUS_CODE`
+        *   **Incorrect Column:** `XLA_AE_HEADERS.ACCOUNTING_STATUS_CODE` (does not exist)
+        *   **Usage:** `WHERE XAH.ACCOUNTING_ENTRY_STATUS_CODE = 'F'` (F = Final accounting entries)
+        *   **Note:** Always use `ACCOUNTING_ENTRY_STATUS_CODE` when filtering for final accounting entries
 
 2.  **Multi-Module Joins:**
     *   **Rule:** Always include `ORG_ID` or `LEDGER_ID` in cross-module joins

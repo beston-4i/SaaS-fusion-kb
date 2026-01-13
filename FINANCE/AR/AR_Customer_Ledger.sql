@@ -1,6 +1,6 @@
 /*
 Title: AR Customer Ledger Report
-Description: Detailed chronological ledger of invoices and receipts per customer.
+Description: Detailed chronological ledger of only invoices and Applied receipts per customer.
 MD050 Reference: FUSION_SAAS/FINANCE/AR/MD050_AR_Customer_Ledger_Report.md
 */
 
@@ -8,8 +8,8 @@ WITH
 -- 1. Parameters
 PARAMS AS (
     SELECT :P_ORG_ID AS ORG_ID
-          ,TO_DATE(:P_FROM_DATE, 'YYYY/MM/DD HH24:MI:SS') AS FROM_DATE
-          ,TO_DATE(:P_TO_DATE, 'YYYY/MM/DD HH24:MI:SS') AS TO_DATE
+          ,(:P_FROM_DATE) AS FROM_DATE
+          ,(:P_TO_DATE) AS TO_DATE
           ,:P_CUSTOMER_ID AS CUSTOMER_ID
     FROM DUAL
 ),
@@ -50,7 +50,6 @@ AR_TRX_MASTER AS (
           ,RA_CUST_TRX_TYPES_ALL RCTT
     WHERE  RCTA.CUSTOMER_TRX_ID = PSA.CUSTOMER_TRX_ID
       AND  RCTA.CUST_TRX_TYPE_SEQ_ID = RCTT.CUST_TRX_TYPE_SEQ_ID
-      AND  RCTA.ORG_ID = RCTT.ORG_ID
       AND  RCTA.COMPLETE_FLAG = 'Y'
       AND  RCTA.ORG_ID = PSA.ORG_ID
 ),

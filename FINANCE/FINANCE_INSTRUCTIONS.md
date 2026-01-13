@@ -75,7 +75,20 @@ All Finance modules have been validated against 22 production reference queries 
 
 ---
 
-## 4. 🚨 Critical Column Standards
+## 4. 🚨 Critical SQL Standards
+
+### 🚫 AMPERSAND RULE (CRITICAL - APPLIES TO ALL QUERIES)
+> [!CRITICAL]
+> **NEVER use ampersand (&) symbol ANYWHERE in SQL queries, including comments.**
+> Ampersand triggers lexical parameter prompts in Oracle BI Tools (OTBI, BI Publisher) causing query failures.
+
+**Common Violations to Avoid:**
+- ❌ WRONG: `-- Currency & Amounts`
+- ✅ CORRECT: `-- Currency AND Amounts`
+- ❌ WRONG: `-- PROJECT & INTERCOMPANY`
+- ✅ CORRECT: `-- PROJECT AND INTERCOMPANY`
+- ❌ WRONG: `-- Balance & Charges`
+- ✅ CORRECT: `-- Balance AND Charges`
 
 ### AR Transaction Types
 *   **Rule:** When joining `RA_CUSTOMER_TRX_ALL` to `RA_CUST_TRX_TYPES_ALL`, you **MUST** use `CUST_TRX_TYPE_SEQ_ID`.
