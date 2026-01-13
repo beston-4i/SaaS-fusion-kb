@@ -3,7 +3,8 @@
 **Module:** Global Payroll  
 **Tag:** `#HCM #PAY #Payroll`  
 **Status:** Production-Ready  
-**Last Updated:** 18-Dec-2025
+**Last Updated:** 13-Jan-2026  
+**Version:** 2.0 (Merged with update file)
 
 ---
 
@@ -507,6 +508,55 @@ AND PIVF.NAME = 'Amount'  -- For element entries
 AND PETF.REPORTING_NAME = 'Gratuity Accrual'  -- Not BASE_ELEMENT_NAME
 ```
 
+### 7.7 Handling Optional/Custom Payroll Tables
+
+**Problem:** Query fails when custom accrual/element tables don't exist  
+**Cause:** Hardcoded joins to client-specific tables
+
+**Solution:** Use outer joins and document
+
+**Pattern:**
+```sql
+-- Define optional CTE
+PAY_CUSTOM_ACCRUALS AS (
+    SELECT
+        PERSON_ID,
+        CUSTOM_ACCRUAL_AMOUNT
+    FROM CLIENT_CUSTOM_ACCRUALS  -- May not exist
+    WHERE ACTIVE_FLAG = 'Y'
+)
+
+-- Use outer join
+FROM
+    PAY_RESULTS_MASTER PRM,
+    PAY_CUSTOM_ACCRUALS PCA
+WHERE
+    PRM.PERSON_ID = PCA.PERSON_ID(+)
+
+-- Handle NULL
+SELECT
+    PRM.PERSON_NUMBER,
+    NVL(PCA.CUSTOM_ACCRUAL_AMOUNT, 0) AS CUSTOM_ACCRUAL
+FROM ...
+```
+
+**Documentation Template:**
+```sql
+/*
+ * OPTIONAL PAYROLL TABLES
+ * ========================
+ * The following CTEs use custom/optional tables:
+ *
+ * 1. PAY_CUSTOM_ACCRUALS (lines 45-60)
+ *    Table: CLIENT_CUSTOM_ACCRUALS
+ *    If missing: Comment out CTE, fields will show as 0
+ *
+ * 2. PAY_CLIENT_ELEMENTS (lines 75-90)
+ *    Table: CLIENT_ELEMENT_DEFINITIONS
+ *    If missing: Comment out CTE, fields will show as NULL
+ */
+```
+
 ---
 
 ## 8. 💡 Calculation Patterns
@@ -539,17 +589,38 @@ ROUND(PEEV.SCREEN_ENTRY_VALUE / 12, 2) MONTHLY_BASIC
 
 ## 9. 📅 Parameters
 
-| Parameter | Format | Description | Example |
-|-----------|--------|-------------|---------|
-| `:P_PERIOD` | DDMMYYYY | Period end date | 31122024 |
-| `:P_PERIOD_NAME` | DD-MM-YYYY | Period name | 31-12-2024 |
-| `:P_PAYROLL` | Numeric | Payroll ID | 300000123456 |
-| `:P_PAYROLLNAME` | String | Payroll name | 'UAE Monthly' |
-| `:P_FLOW_NAME` | String | Flow instance | 'Monthly Payroll Dec 2024' |
-| `:P_CONSOLIDATE_SET` | String | Consolidation set | 'Standard' |
-| `:P_START_DATE` | Date | Start date | TO_DATE('01-12-2024','DD-MM-YYYY') |
-| `:P_END_DATE` | Date | End date | TO_DATE('31-12-2024','DD-MM-YYYY') |
-| `:P_DATE` | Date | Effective date | TRUNC(SYSDATE) |
+| Parameter | Format | Description | Example | Enhanced Pattern |
+|-----------|--------|-------------|---------|------------------|
+| `:P_PERIOD` | DDMMYYYY | Period end date | 31122024 | - |
+| `:P_PERIOD_NAME` | DD-MM-YYYY | Period name | 31-12-2024 | - |
+| `:P_PAYROLL` | Numeric | Payroll ID | 300000123456 | - |
+| `:P_PAYROLLNAME` | String | Payroll name | 'UAE Monthly' | - |
+| `:P_FLOW_NAME` | String | Flow instance | 'Monthly Payroll Dec 2024' | - |
+| `:P_CONSOLIDATE_SET` | String | Consolidation set | 'Standard' | - |
+| `:P_START_DATE` | Date | Start date | TO_DATE('01-12-2024','DD-MM-YYYY') | - |
+| `:P_END_DATE` | Date | End date | TO_DATE('31-12-2024','DD-MM-YYYY') | - |
+| `:P_DATE` | Date | Effective date | TRUNC(SYSDATE) | - |
+| `:P_ELEMENT_NAME` | String | Element name filter | 'Basic Salary' | `UPPER(NVL(:P_ELEMENT_NAME, 'ALL'))` |
+| `:P_PAYROLL_NAME` | String | Payroll name filter | 'UAE Monthly' | `UPPER(NVL(:P_PAYROLL_NAME, 'ALL'))` |
+| `:P_CLASSIFICATION` | String | Classification filter | 'Standard Earnings' | `UPPER(NVL(:P_CLASSIFICATION, 'ALL'))` |
+
+### 9.1 Case-Insensitive Parameter Filtering
+
+**Usage Pattern:**
+```sql
+WITH PARAMETERS AS (
+    SELECT
+        UPPER(NVL(:P_ELEMENT_NAME, 'ALL')) AS ELEMENT_NAME,
+        UPPER(NVL(:P_PAYROLL_NAME, 'ALL')) AS PAYROLL_NAME
+    FROM DUAL
+)
+
+-- In WHERE clause
+AND (UPPER(PETF.BASE_ELEMENT_NAME) = P.ELEMENT_NAME OR P.ELEMENT_NAME = 'ALL')
+AND (UPPER(PAP.PAYROLL_NAME) = P.PAYROLL_NAME OR P.PAYROLL_NAME = 'ALL')
+```
+
+**Benefit:** Users can enter "basic salary", "Basic Salary", or "BASIC SALARY" - all work.
 
 ---
 
@@ -587,8 +658,421 @@ DECODE(DEPARTMENT_NAME,
     ...) COST_CENTER
 ```
 
+### 10.3 Component Breakdown for Transparency
+
+**Use Case:** Show how gross/net is calculated
+
+**Pattern:**
+```sql
+SELECT
+    PERSON_NUMBER,
+    FULL_NAME,
+    -- Component breakdown
+    NVL(BASIC_SALARY, 0) AS BASIC,
+    NVL(HOUSING, 0) AS HOUSING,
+    NVL(TRANSPORT, 0) AS TRANSPORT,
+    NVL(OTHER_ALLOWANCES, 0) AS OTHER,
+    -- Calculated gross (shows formula)
+    (NVL(BASIC_SALARY, 0) + NVL(HOUSING, 0) + 
+     NVL(TRANSPORT, 0) + NVL(OTHER_ALLOWANCES, 0)) AS CALC_GROSS,
+    -- Deductions
+    NVL(TOTAL_DEDUCTIONS, 0) AS DEDUCTIONS,
+    -- Calculated net (shows formula)
+    ((NVL(BASIC_SALARY, 0) + NVL(HOUSING, 0) + 
+      NVL(TRANSPORT, 0) + NVL(OTHER_ALLOWANCES, 0)) - 
+     NVL(TOTAL_DEDUCTIONS, 0)) AS CALC_NET_PAY
+FROM PAY_RESULTS;
+```
+
+**Benefits:**
+- Users can verify calculations
+- Transparent breakdown
+- Easier troubleshooting
+- Builds trust in payroll data
+
+**When to Use:**
+- Payslips
+- Salary statements
+- Earning/deduction registers
+- Reconciliation reports
+
 ---
 
-**Last Updated:** 18-Dec-2025  
+## 11. 🚀 Advanced Payroll Patterns (07-Jan-2026)
+
+### 11.1 Dynamic Payroll Report (Element-Agnostic)
+
+**Problem:** Create flexible payroll reports that work with any element configuration
+
+**Solution:**
+
+```sql
+WITH PER_RES AS (
+    SELECT
+        PPRD.PERSON_ID,
+        PTP.PERIOD_NAME,
+        TO_CHAR(PTP.START_DATE, 'YYYY') YEAR,
+        DECODE(PTP.PERIOD_NUM,
+            '1', 'January', '2', 'February', '3', 'March', '4', 'April',
+            '5', 'May', '6', 'June', '7', 'July', '8', 'August',
+            '9', 'September', '10', 'October', '11', 'November', '12', 'December'
+        ) MONTH,
+        PPA.DATE_EARNED,
+        PPA.EFFECTIVE_DATE,
+        PAP.PAYROLL_NAME,
+        PPA.PAYROLL_ID,
+        PCS.CONSOLIDATION_SET_NAME,
+        PCS.CONSOLIDATION_SET_ID,
+        PETT.ELEMENT_NAME,
+        
+        -- Aggregate by classification
+        SUM(CASE 
+            WHEN PEC.BASE_CLASSIFICATION_NAME = 'Standard Earnings'
+            THEN TO_NUMBER(PRRV.RESULT_VALUE)
+            ELSE 0
+        END) TOTAL_EARNINGS,
+        
+        SUM(CASE 
+            WHEN PEC.BASE_CLASSIFICATION_NAME IN ('Voluntary Deductions', 
+                                                  'Social Insurance Deductions', 
+                                                  'Involuntary Deductions')
+            THEN TO_NUMBER(PRRV.RESULT_VALUE)
+            ELSE 0
+        END) DEDUCTIONS,
+        
+        -- Custom order for display
+        CASE
+            WHEN PEC.BASE_CLASSIFICATION_NAME = 'Standard Earnings' THEN 1
+            WHEN PEC.BASE_CLASSIFICATION_NAME IN ('Voluntary Deductions', 
+                                                  'Social Insurance Deductions', 
+                                                  'Involuntary Deductions') THEN 2
+            ELSE 3
+        END AS CUSTOM_ORDER
+        
+    FROM
+        PAY_RUN_RESULT_VALUES PRRV,
+        PAY_RUN_RESULTS PRR,
+        PAY_PAYROLL_REL_ACTIONS PPRA,
+        PAY_PAYROLL_ACTIONS PPA,
+        PAY_PAY_RELATIONSHIPS_DN PPRD,
+        PAY_TIME_PERIODS PTP,
+        PAY_ELEMENT_TYPES_F PETF,
+        PAY_ELEMENT_TYPES_TL PETT,
+        PAY_INPUT_VALUES_F PIVF,
+        PAY_ALL_PAYROLLS_F PAP,
+        PAY_ELE_CLASSIFICATIONS PEC,
+        PAY_CONSOLIDATION_SETS PCS,
+        PAY_REQUESTS PRQ,
+        PAY_FLOW_INSTANCES PFI
+    WHERE
+        PRRV.RUN_RESULT_ID = PRR.RUN_RESULT_ID
+        AND PRR.PAYROLL_REL_ACTION_ID = PPRA.PAYROLL_REL_ACTION_ID
+        AND PPRA.PAYROLL_ACTION_ID = PPA.PAYROLL_ACTION_ID
+        AND PPRA.PAYROLL_RELATIONSHIP_ID = PPRD.PAYROLL_RELATIONSHIP_ID
+        
+        -- Payroll run filters
+        AND PPA.ACTION_TYPE IN ('Q', 'R')
+        AND PPA.ACTION_STATUS = 'C'
+        AND PPRA.RETRO_COMPONENT_ID IS NULL
+        
+        -- Element linkage
+        AND PETF.ELEMENT_TYPE_ID = PRR.ELEMENT_TYPE_ID
+        AND PETF.ELEMENT_TYPE_ID = PETT.ELEMENT_TYPE_ID
+        AND PIVF.ELEMENT_TYPE_ID = PETF.ELEMENT_TYPE_ID
+        AND PIVF.INPUT_VALUE_ID = PRRV.INPUT_VALUE_ID
+        
+        -- Classification filter
+        AND PETF.CLASSIFICATION_ID = PEC.CLASSIFICATION_ID
+        AND PEC.BASE_CLASSIFICATION_NAME IN ('Standard Earnings', 
+                                             'Voluntary Deductions', 
+                                             'Social Insurance Deductions', 
+                                             'Involuntary Deductions')
+        
+        -- Pay value only
+        AND UPPER(TRIM(PIVF.BASE_NAME)) = 'PAY VALUE'
+        
+        -- Language
+        AND PETT.LANGUAGE = 'US'
+        
+        -- Period linkage
+        AND PPA.EARN_TIME_PERIOD_ID = PTP.TIME_PERIOD_ID
+        AND PPA.PAYROLL_ID = PAP.PAYROLL_ID
+        
+        -- Flow instance tracking
+        AND PPA.PAY_REQUEST_ID = PRQ.PAY_REQUEST_ID
+        AND PRQ.FLOW_INSTANCE_ID = PFI.FLOW_INSTANCE_ID
+        AND PPA.CONSOLIDATION_SET_ID = PCS.CONSOLIDATION_SET_ID
+        
+        -- Date filters
+        AND TRUNC(PPA.DATE_EARNED) BETWEEN PETF.EFFECTIVE_START_DATE AND PETF.EFFECTIVE_END_DATE
+        AND TRUNC(PPA.DATE_EARNED) BETWEEN PIVF.EFFECTIVE_START_DATE AND PIVF.EFFECTIVE_END_DATE
+        AND TRUNC(PPA.DATE_EARNED) BETWEEN PAP.EFFECTIVE_START_DATE AND PAP.EFFECTIVE_END_DATE
+        
+        -- Parameters
+        AND TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)) = NVL(TO_DATE(:P_PERIOD_NAME, 'DD-MM-YYYY'), TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)))
+        AND PAP.PAYROLL_NAME = NVL(:P_PAYROLLNAME, PAP.PAYROLL_NAME)
+        AND PFI.INSTANCE_NAME = NVL(:P_FLOW_NAME, PFI.INSTANCE_NAME)
+        
+    GROUP BY
+        PPRD.PERSON_ID,
+        PTP.PERIOD_NAME,
+        PPA.DATE_EARNED,
+        PPA.EFFECTIVE_DATE,
+        PTP.START_DATE,
+        PTP.PERIOD_NUM,
+        PAP.PAYROLL_NAME,
+        TO_CHAR(PTP.START_DATE, 'YYYY'),
+        PCS.CONSOLIDATION_SET_NAME,
+        PCS.CONSOLIDATION_SET_ID,
+        PETT.ELEMENT_NAME,
+        PPA.PAYROLL_ID,
+        PEC.BASE_CLASSIFICATION_NAME
+)
+SELECT
+    PAPF.PERSON_NUMBER,
+    PPNF.DISPLAY_NAME EMPLOYEE_NAME,
+    
+    -- Assignment details
+    PAAF.ASSIGNMENT_NUMBER,
+    ORG.NAME DEPARTMENT,
+    JOB.NAME JOB,
+    GRADE.NAME GRADE,
+    
+    -- Period
+    PR.PERIOD_NAME,
+    PR.YEAR,
+    PR.MONTH,
+    
+    -- Payroll
+    PR.PAYROLL_NAME,
+    PR.CONSOLIDATION_SET_NAME,
+    
+    -- Element name
+    PR.ELEMENT_NAME,
+    
+    -- Values
+    NVL(PR.TOTAL_EARNINGS, 0) EARNINGS,
+    NVL(PR.DEDUCTIONS, 0) DEDUCTIONS,
+    
+    -- Net pay (sum over person for all elements)
+    SUM(NVL(PR.TOTAL_EARNINGS, 0) - NVL(PR.DEDUCTIONS, 0)) OVER (PARTITION BY PAPF.PERSON_ID) NET_PAY
+    
+FROM
+    PER_RES PR,
+    PER_ALL_PEOPLE_F PAPF,
+    PER_PERSON_NAMES_F PPNF,
+    PER_ALL_ASSIGNMENTS_F PAAF,
+    PER_DEPARTMENTS ORG,
+    PER_JOBS_F_VL JOB,
+    PER_GRADES_F_VL GRADE
+WHERE
+    PR.PERSON_ID = PAPF.PERSON_ID
+    AND PAPF.PERSON_ID = PPNF.PERSON_ID
+    AND PAPF.PERSON_ID = PAAF.PERSON_ID
+    
+    AND PAAF.ORGANIZATION_ID = ORG.ORGANIZATION_ID(+)
+    AND PAAF.JOB_ID = JOB.JOB_ID(+)
+    AND PAAF.GRADE_ID = GRADE.GRADE_ID(+)
+    
+    AND PPNF.NAME_TYPE = 'GLOBAL'
+    AND PAAF.ASSIGNMENT_TYPE = 'E'
+    AND PAAF.PRIMARY_FLAG = 'Y'
+    AND PAAF.EFFECTIVE_LATEST_CHANGE = 'Y'
+    
+    AND TRUNC(SYSDATE) BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
+    AND TRUNC(SYSDATE) BETWEEN PPNF.EFFECTIVE_START_DATE AND PPNF.EFFECTIVE_END_DATE
+    AND TRUNC(SYSDATE) BETWEEN ORG.EFFECTIVE_START_DATE(+) AND ORG.EFFECTIVE_END_DATE(+)
+    AND TRUNC(SYSDATE) BETWEEN JOB.EFFECTIVE_START_DATE(+) AND JOB.EFFECTIVE_END_DATE(+)
+    AND TRUNC(SYSDATE) BETWEEN GRADE.EFFECTIVE_START_DATE(+) AND GRADE.EFFECTIVE_END_DATE(+)
+    
+ORDER BY
+    CAST(PAPF.PERSON_NUMBER AS NUMBER DEFAULT 9999999999 ON CONVERSION ERROR),
+    PR.CUSTOM_ORDER
+```
+
+**Benefits:**
+- ✅ Works with any element configuration
+- ✅ No hardcoded element names
+- ✅ Dynamically aggregates by classification
+- ✅ Handles multiple payrolls
+- ✅ Tracks flow instance for audit
+
+**Key Tables:**
+- `PAY_CONSOLIDATION_SETS` - Consolidation set tracking
+- `PAY_REQUESTS` - Payroll request
+- `PAY_FLOW_INSTANCES` - Specific payroll run instance
+
+### 11.2 Balance Extraction Pattern
+
+**Problem:** Get balance values (gratuity provision, airfare provision, etc.)
+
+**Solution:**
+
+```sql
+SELECT
+    PPRD.PERSON_ID,
+    PPA.EFFECTIVE_DATE,
+    PPA.DATE_EARNED,
+    PPA.PAYROLL_ACTION_ID,
+    
+    -- Balance value
+    BAL.BALANCE_VALUE,
+    
+    -- Balance name (mapped)
+    CASE
+        WHEN PBT.BALANCE_NAME = 'DYR_Gratuity_Provision' THEN 'Gratuity Provision'
+        WHEN PBT.BALANCE_NAME = 'Air Fare Provision' THEN 'Airfare Provision'
+        ELSE PBT.BALANCE_NAME
+    END BALANCE_NAME
+    
+FROM
+    PER_LEGISLATIVE_DATA_GROUPS_VL LDG,
+    PAY_PAY_RELATIONSHIPS_DN PPRD,
+    PAY_PAYROLL_REL_ACTIONS PRA,
+    PAY_PAYROLL_ACTIONS PPA,
+    PAY_ACTION_CLASSES PAC,
+    PAY_BALANCE_TYPES_VL PBT,
+    TABLE(PAY_BALANCE_VIEW_PKG.GET_BALANCE_DIMENSIONS(
+        P_BALANCE_TYPE_ID => PBT.BALANCE_TYPE_ID,
+        P_PAYROLL_REL_ACTION_ID => PRA.PAYROLL_REL_ACTION_ID,
+        P_PAYROLL_TERM_ID => NULL,
+        P_PAYROLL_ASSIGNMENT_ID => NULL
+    )) BAL,
+    PAY_DIMENSION_USAGES_VL PDU,
+    PAY_ALL_PAYROLLS_F PAP,
+    PER_ALL_PEOPLE_F PAPF1
+WHERE
+    PPRD.LEGISLATIVE_DATA_GROUP_ID = LDG.LEGISLATIVE_DATA_GROUP_ID
+    AND PRA.PAYROLL_RELATIONSHIP_ID = PPRD.PAYROLL_RELATIONSHIP_ID
+    AND PRA.RETRO_COMPONENT_ID IS NULL
+    
+    -- Ensure results exist
+    AND EXISTS (
+        SELECT 1
+        FROM PAY_RUN_RESULTS PRR
+        WHERE PRR.PAYROLL_REL_ACTION_ID = PRA.PAYROLL_REL_ACTION_ID
+    )
+    
+    AND PPA.PAYROLL_ACTION_ID = PRA.PAYROLL_ACTION_ID
+    AND PAC.ACTION_TYPE = PPA.ACTION_TYPE
+    AND PAC.CLASSIFICATION_NAME = 'SEQUENCED'
+    AND PPA.PAYROLL_ID = PAP.PAYROLL_ID
+    AND PPA.ACTION_TYPE IN ('Q', 'R')
+    AND PPA.ACTION_STATUS = 'C'
+    
+    -- Balance type
+    AND NVL(PBT.LEGISLATION_CODE, LDG.LEGISLATION_CODE) = LDG.LEGISLATION_CODE
+    AND NVL(PBT.LEGISLATIVE_DATA_GROUP_ID, LDG.LEGISLATIVE_DATA_GROUP_ID) = LDG.LEGISLATIVE_DATA_GROUP_ID
+    AND PBT.BALANCE_NAME IN ('Air Fare Provision', 'DYR_Gratuity_Provision')
+    
+    -- Dimension
+    AND PDU.DIMENSION_NAME = 'Assignment Inception to Date'
+    AND PDU.BALANCE_DIMENSION_ID = BAL.BALANCE_DIMENSION_ID
+    AND NVL(PDU.LEGISLATION_CODE, LDG.LEGISLATION_CODE) = LDG.LEGISLATION_CODE
+    AND NVL(PDU.LEGISLATIVE_DATA_GROUP_ID, LDG.LEGISLATIVE_DATA_GROUP_ID) = LDG.LEGISLATIVE_DATA_GROUP_ID
+    
+    AND PPRD.PERSON_ID = PAPF1.PERSON_ID
+    AND BAL.BALANCE_VALUE <> '0'
+    
+    -- Period filter
+    AND PAP.PAYROLL_ID = NVL(:P_PAYROLL, PAP.PAYROLL_ID)
+    AND TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)) = NVL(TO_DATE(:P_PERIOD, 'DDMMYYYY'), TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)))
+```
+
+**Key Function:**
+- `PAY_BALANCE_VIEW_PKG.GET_BALANCE_DIMENSIONS` - Extracts balance values
+
+**Common Balances:**
+- `'Air Fare Provision'` - Airfare accrual
+- `'DYR_Gratuity_Provision'` / `'Gratuity Provision'` - Gratuity accrual
+- `'Annual Leave Accrual'` - Leave liability
+
+**Dimensions:**
+- `'Assignment Inception to Date'` - Total since hire
+- `'Assignment Run to Date'` - Total in current assignment
+- `'Assignment Period to Date'` - Current period only
+
+### 11.3 Information Elements Pattern
+
+**Problem:** Extract information elements (non-monetary values)
+
+**Solution:**
+
+```sql
+SELECT
+    PPRD.PERSON_ID,
+    PTP.PERIOD_NAME,
+    PPA.EFFECTIVE_DATE,
+    PETF.BASE_ELEMENT_NAME ELEMENT_NAME,
+    PRRV.RESULT_VALUE
+FROM
+    PAY_RUN_RESULT_VALUES PRRV,
+    PAY_RUN_RESULTS PRR,
+    PAY_PAYROLL_REL_ACTIONS PPRA,
+    PAY_PAYROLL_ACTIONS PPA,
+    PAY_PAY_RELATIONSHIPS_DN PPRD,
+    PAY_TIME_PERIODS PTP,
+    PAY_ELEMENT_TYPES_F PETF,
+    PAY_INPUT_VALUES_F PIVF,
+    PAY_ALL_PAYROLLS_F PAP,
+    PAY_ELE_CLASSIFICATIONS PEC
+WHERE
+    PRRV.RUN_RESULT_ID = PRR.RUN_RESULT_ID
+    AND PRR.PAYROLL_REL_ACTION_ID = PPRA.PAYROLL_REL_ACTION_ID
+    AND PPRA.PAYROLL_ACTION_ID = PPA.PAYROLL_ACTION_ID
+    AND PPRA.PAYROLL_RELATIONSHIP_ID = PPRD.PAYROLL_RELATIONSHIP_ID
+    
+    AND PPA.ACTION_TYPE IN ('Q', 'R')
+    AND PPA.ACTION_STATUS = 'C'
+    AND PPA.EARN_TIME_PERIOD_ID = PTP.TIME_PERIOD_ID
+    
+    AND PETF.ELEMENT_TYPE_ID = PRR.ELEMENT_TYPE_ID
+    AND PIVF.ELEMENT_TYPE_ID = PETF.ELEMENT_TYPE_ID
+    AND PIVF.INPUT_VALUE_ID = PRRV.INPUT_VALUE_ID
+    AND PPA.PAYROLL_ID = PAP.PAYROLL_ID
+    
+    AND PETF.CLASSIFICATION_ID = PEC.CLASSIFICATION_ID
+    
+    -- INFORMATION classification only
+    AND PEC.BASE_CLASSIFICATION_NAME = 'Information'
+    
+    AND PIVF.BASE_NAME = 'Pay Value'
+    AND PETF.BASE_ELEMENT_NAME NOT LIKE '%Results'
+    
+    AND PPRA.RETRO_COMPONENT_ID IS NULL
+    
+    AND TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)) = NVL(TO_DATE(:P_PERIOD, 'DD-MM-YYYY'), TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)))
+    AND TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)) BETWEEN PETF.EFFECTIVE_START_DATE AND PETF.EFFECTIVE_END_DATE
+    AND TRUNC(LAST_DAY(PPA.EFFECTIVE_DATE)) BETWEEN PIVF.EFFECTIVE_START_DATE AND PIVF.EFFECTIVE_END_DATE
+    
+    AND PAP.PAYROLL_ID = NVL(:P_PAYROLL, PAP.PAYROLL_ID)
+```
+
+**Information Elements (Common):**
+- Days worked
+- Hours worked
+- Working days
+- FTE calculations
+- Headcount values
+
+### 11.4 Accrual from Payroll Run (YTD)
+
+**Problem:** Get YTD accrual values from payroll runs
+
+**Common Accrual Elements:**
+
+| Element Name | Input Value | Purpose |
+|--------------|-------------|---------|
+| Annual Leave Salary Accrual | Monthly Accrual Amount | Monthly leave accrual amount |
+| Gratuity Liability | Monthly Liability Amount | Monthly gratuity accrual |
+| Gratuity Liability | Total Liability Amount Till Date | Total gratuity balance |
+| Person Air Ticket Accrual | (Pay Value) | Self airfare provision |
+| Spouse Air Ticket Accruals | (Pay Value) | Spouse airfare provision |
+| Child Air Ticket Accruals | (Pay Value) | Children airfare provision |
+
+---
+
+**Last Updated:** 13-Jan-2026  
+**Version:** 2.0 (Merged with update and advanced patterns files)  
 **Status:** Production-Ready  
-**Source:** 4 Production Payroll Queries (1,252 lines analyzed)
+**Source:** 4 Production Payroll Queries (1,252 lines analyzed) + 10 Advanced Pattern Queries

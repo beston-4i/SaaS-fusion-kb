@@ -3,7 +3,8 @@
 **Module:** Global Payroll  
 **Tag:** `#HCM #PAY #Repositories`  
 **Status:** Production-Ready  
-**Last Updated:** 18-Dec-2025
+**Last Updated:** 13-Jan-2026  
+**Version:** 2.0 (Merged with update file)
 
 ---
 
@@ -505,6 +506,212 @@ PAY_FLOW_INST AS (
 
 ---
 
-**Last Updated:** 18-Dec-2025  
+## 11. Enhanced Pattern CTEs (02-Jan-2026 Update)
+
+### 11.1 PARAMETERS CTE (With Effective Date Filtering)
+
+**Purpose:** Parameter handling with effective date support  
+**Usage:** For historical payroll queries
+
+```sql
+WITH PARAMETERS AS (
+    /*+ qb_name(PARAMETERS) */
+    SELECT
+        TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY')) AS EFFECTIVE_DATE,
+        TRUNC(LAST_DAY(TO_DATE(:P_PERIOD_END, 'DD-MON-YYYY'))) AS PERIOD_END,
+        UPPER(NVL(:P_ELEMENT_NAME, 'ALL')) AS ELEMENT_NAME,
+        UPPER(NVL(:P_PAYROLL_NAME, 'ALL')) AS PAYROLL_NAME,
+        UPPER(NVL(:P_CLASSIFICATION, 'ALL')) AS CLASSIFICATION
+    FROM DUAL
+)
+```
+
+**Benefits:**
+- Flexible date handling for historical queries
+- Case-insensitive parameter filtering
+- 'ALL' bypass for showing all elements/payrolls
+
+**Application in WHERE Clause:**
+```sql
+-- Effective date filtering
+AND P.EFFECTIVE_DATE BETWEEN PETF.EFFECTIVE_START_DATE AND PETF.EFFECTIVE_END_DATE
+AND P.EFFECTIVE_DATE BETWEEN PIVF.EFFECTIVE_START_DATE AND PIVF.EFFECTIVE_END_DATE
+
+-- Case-insensitive filters
+AND (UPPER(PETF.BASE_ELEMENT_NAME) = P.ELEMENT_NAME OR P.ELEMENT_NAME = 'ALL')
+AND (UPPER(PAP.PAYROLL_NAME) = P.PAYROLL_NAME OR P.PAYROLL_NAME = 'ALL')
+AND (UPPER(PEC.BASE_CLASSIFICATION_NAME) = P.CLASSIFICATION OR P.CLASSIFICATION = 'ALL')
+```
+
+---
+
+### 11.2 PAY_ENTRY_ELEMENTS_ENHANCED
+
+**Purpose:** Element entries with effective date support  
+**Usage:** For historical element assignment queries
+
+```sql
+PAY_ENTRY_ELEMENTS AS (
+    SELECT /*+ qb_name(PAY_ENTRY) MATERIALIZE */
+           PEEF.PERSON_ID,
+           PETV.BASE_ELEMENT_NAME,
+           PETV.ELEMENT_NAME,
+           TO_NUMBER(PEEV.SCREEN_ENTRY_VALUE) AS AMOUNT,
+           PEC.BASE_CLASSIFICATION_NAME
+    FROM
+        PAY_ELEMENT_TYPES_VL PETV,
+        PAY_ELEMENT_ENTRIES_F PEEF,
+        PAY_ELEMENT_ENTRY_VALUES_F PEEV,
+        PAY_INPUT_VALUES_VL PIVL,
+        PAY_ELE_CLASSIFICATIONS PEC,
+        PARAMETERS P
+    WHERE
+        PETV.ELEMENT_TYPE_ID = PEEF.ELEMENT_TYPE_ID
+    AND PEEF.ELEMENT_ENTRY_ID = PEEV.ELEMENT_ENTRY_ID
+    AND PEEV.INPUT_VALUE_ID = PIVL.INPUT_VALUE_ID
+    AND PETV.CLASSIFICATION_ID = PEC.CLASSIFICATION_ID
+    AND UPPER(TRIM(PIVL.NAME)) = 'AMOUNT'
+    -- Use Effective Date
+    AND P.EFFECTIVE_DATE BETWEEN PEEF.EFFECTIVE_START_DATE AND PEEF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PEEV.EFFECTIVE_START_DATE AND PEEV.EFFECTIVE_END_DATE
+    -- Case-insensitive filter
+    AND (UPPER(PETV.BASE_ELEMENT_NAME) = P.ELEMENT_NAME OR P.ELEMENT_NAME = 'ALL')
+    AND (UPPER(PEC.BASE_CLASSIFICATION_NAME) = P.CLASSIFICATION OR P.CLASSIFICATION = 'ALL')
+)
+```
+
+---
+
+### 11.3 PAY_COMPONENT_BREAKDOWN
+
+**Purpose:** Show salary component breakdown for transparency  
+**Usage:** Payslips, salary statements, reconciliation
+
+```sql
+PAY_COMPONENT_BREAKDOWN AS (
+    SELECT /*+ qb_name(PAY_BREAKDOWN) */
+           PERSON_ID,
+           SUM(CASE WHEN ELEMENT_NAME = 'Basic Salary' THEN AMOUNT ELSE 0 END) AS BASIC,
+           SUM(CASE WHEN ELEMENT_NAME = 'Housing Allowance' THEN AMOUNT ELSE 0 END) AS HOUSING,
+           SUM(CASE WHEN ELEMENT_NAME = 'Transport Allowance' THEN AMOUNT ELSE 0 END) AS TRANSPORT,
+           SUM(CASE WHEN ELEMENT_NAME = 'Other Allowances' THEN AMOUNT ELSE 0 END) AS OTHER,
+           -- Calculated gross
+           SUM(CASE WHEN BASE_CLASSIFICATION_NAME = 'Standard Earnings' 
+               THEN AMOUNT ELSE 0 END) AS CALC_GROSS,
+           -- Deductions
+           SUM(CASE WHEN BASE_CLASSIFICATION_NAME IN ('Voluntary Deductions', 
+                                                       'Involuntary Deductions') 
+               THEN AMOUNT ELSE 0 END) AS TOTAL_DEDUCTIONS,
+           -- Calculated net
+           (SUM(CASE WHEN BASE_CLASSIFICATION_NAME = 'Standard Earnings' 
+                    THEN AMOUNT ELSE 0 END) -
+            SUM(CASE WHEN BASE_CLASSIFICATION_NAME IN ('Voluntary Deductions', 
+                                                        'Involuntary Deductions') 
+                    THEN AMOUNT ELSE 0 END)) AS CALC_NET_PAY
+    FROM PAY_RESULTS_MASTER
+    GROUP BY PERSON_ID
+)
+```
+
+**Benefits:**
+- Users can verify calculations
+- Transparent breakdown of gross/net
+- Easier troubleshooting
+
+---
+
+### 11.4 PAY_OPTIONAL_ACCRUALS
+
+**Purpose:** Handle optional/custom accrual tables  
+**Usage:** When client-specific tables may not exist
+
+```sql
+PAY_ACCRUAL_CUSTOM AS (
+    /*+ qb_name(PAY_ACCRUAL) */
+    SELECT
+        PERSON_ID,
+        ACCRUAL_AMOUNT,
+        ACCRUAL_TYPE
+    FROM CUSTOM_ACCRUAL_TABLE  -- May not exist in all environments
+    WHERE ACTIVE_FLAG = 'Y'
+)
+
+-- Use outer join in main query
+FROM
+    PAY_RESULTS_MASTER PRM,
+    PAY_ACCRUAL_CUSTOM PAC
+WHERE
+    PRM.PERSON_ID = PAC.PERSON_ID(+)
+
+-- Handle NULL in SELECT
+SELECT
+    PRM.PERSON_NUMBER,
+    NVL(PAC.ACCRUAL_AMOUNT, 0) AS CUSTOM_ACCRUAL
+FROM ...
+```
+
+**Documentation:**
+```sql
+/*
+ * OPTIONAL TABLES FOR PAYROLL
+ * ============================
+ * 1. CUSTOM_ACCRUAL_TABLE - Custom accrual tracking
+ *    - If missing, comment out PAY_ACCRUAL_CUSTOM CTE
+ *    - Accrual fields will show as 0
+ */
+```
+
+---
+
+## 🎯 Usage Example: Enhanced Element Entry Query
+
+```sql
+WITH PARAMETERS AS (
+    SELECT
+        TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY')) AS EFFECTIVE_DATE,
+        UPPER(NVL(:P_ELEMENT_NAME, 'ALL')) AS ELEMENT_NAME
+    FROM DUAL
+)
+,PAY_ENTRY_ELEMENTS AS (
+    SELECT
+        PEEF.PERSON_ID,
+        PETV.BASE_ELEMENT_NAME,
+        TO_NUMBER(PEEV.SCREEN_ENTRY_VALUE) AS AMOUNT
+    FROM
+        PAY_ELEMENT_TYPES_VL PETV,
+        PAY_ELEMENT_ENTRIES_F PEEF,
+        PAY_ELEMENT_ENTRY_VALUES_F PEEV,
+        PAY_INPUT_VALUES_VL PIVL,
+        PARAMETERS P
+    WHERE
+        PETV.ELEMENT_TYPE_ID = PEEF.ELEMENT_TYPE_ID
+    AND PEEF.ELEMENT_ENTRY_ID = PEEV.ELEMENT_ENTRY_ID
+    AND PEEV.INPUT_VALUE_ID = PIVL.INPUT_VALUE_ID
+    AND UPPER(TRIM(PIVL.NAME)) = 'AMOUNT'
+    -- Use Effective Date
+    AND P.EFFECTIVE_DATE BETWEEN PEEF.EFFECTIVE_START_DATE AND PEEF.EFFECTIVE_END_DATE
+    AND P.EFFECTIVE_DATE BETWEEN PEEV.EFFECTIVE_START_DATE AND PEEV.EFFECTIVE_END_DATE
+    -- Case-insensitive filter
+    AND (UPPER(PETV.BASE_ELEMENT_NAME) = P.ELEMENT_NAME OR P.ELEMENT_NAME = 'ALL')
+)
+SELECT * FROM PAY_ENTRY_ELEMENTS;
+```
+
+---
+
+## ⚠️ Critical Payroll Constraints (DO NOT CHANGE)
+
+These patterns must remain as-is:
+1. **ACTION_TYPE filtering:** `AND PPA.ACTION_TYPE IN ('Q', 'R')` - REQUIRED
+2. **ACTION_STATUS filtering:** `AND PPA.ACTION_STATUS IN ('C')` - REQUIRED
+3. **RETRO_COMPONENT exclusion:** `AND PPRA.RETRO_COMPONENT_ID IS NULL` - REQUIRED
+4. **INPUT_VALUE selection:** `AND PIVF.BASE_NAME = 'Pay Value'` - REQUIRED
+
+**The new patterns COMPLEMENT these, they do not replace them.**
+
+---
+
+**Last Updated:** 13-Jan-2026  
+**Version:** 2.0 (Merged with update file)  
 **Status:** Production-Ready  
 **Source:** 4 Production Payroll Queries
