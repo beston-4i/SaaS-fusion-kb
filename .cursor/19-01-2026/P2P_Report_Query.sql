@@ -1,25 +1,3 @@
-# Cross-Module Report Templates
-
-**Purpose:** Ready-to-use SQL skeletons for cross-module reporting  
-**Scope:** Queries spanning multiple SCM modules
-
----
-
-## 1. Procure to Pay (P2P) Report - Requirements-Based Implementation
-*Complete P2P cycle from requisition to payment with all 23 required columns.*
-
-**Reference:** See `.cursor/19-01-2026/P2P_Report_Requirements.md` for complete requirements documentation.
-
-**Key Features:**
-- 23 output columns (Requisition → PO → Receipt → Invoice → Payment)
-- 3 parameters: Business Unit Name (optional), PR From/To Date
-- One row per PR Distribution
-- Left outer joins for optional stages
-- Multiple payments per invoice (separate rows)
-- Date formatting: DD-MON-YYYY
-- NVL pattern for optional Business Unit filter
-
-```sql
 /*
 TITLE: Procure to Pay (P2P) Report
 PURPOSE: Complete P2P cycle tracking from Requisition to Payment with all key columns
@@ -184,7 +162,7 @@ RECEIPT_MASTER AS (
       AND  RT.TRANSACTION_TYPE = 'RECEIVE'
 ),
 
--- 13. Invoice Master (Headers linked via receipt transaction)
+-- 14. Invoice Master (Headers linked via receipt transaction)
 INVOICE_MASTER AS (
     SELECT /*+ qb_name(INV_MST) MATERIALIZE PARALLEL(2) */
            AIA.INVOICE_ID
@@ -203,7 +181,7 @@ INVOICE_MASTER AS (
       AND  AILA.RCV_TRANSACTION_ID IS NOT NULL
 ),
 
--- 14. Invoice Status Lookup (using decode pattern from AP_MASTER)
+-- 15. Invoice Status Lookup (using decode pattern from AP_MASTER)
 INVOICE_STATUS_DECODE AS (
     SELECT /*+ qb_name(INV_STAT) MATERIALIZE */
            'FULL' AS STATUS_CODE, 'FULLY APPLIED' AS INVOICE_STATUS FROM DUAL
@@ -225,7 +203,7 @@ INVOICE_STATUS_DECODE AS (
     SELECT 'PERMANENT', 'PERMANENT PREPAYMENT' FROM DUAL
 ),
 
--- 15. Payment Master (with amount from AP_INVOICE_PAYMENTS_ALL)
+-- 16. Payment Master (with amount from AP_INVOICE_PAYMENTS_ALL)
 PAYMENT_MASTER AS (
     SELECT /*+ qb_name(PAY_MST) MATERIALIZE */
            AIPA.INVOICE_ID
@@ -239,7 +217,7 @@ PAYMENT_MASTER AS (
       AND  ACA.STATUS_LOOKUP_CODE <> 'VOIDED'
 ),
 
--- 16. PR Detail (Base with PR, Lines, Distributions)
+-- 17. PR Detail (Base with PR, Lines, Distributions)
 PR_DETAIL AS (
     SELECT /*+ qb_name(PR_DTL) MATERIALIZE */
            PRM.REQUISITION_HEADER_ID
@@ -260,7 +238,7 @@ PR_DETAIL AS (
       AND  PRL.REQUISITION_LINE_ID = PRD.REQUISITION_LINE_ID
 ),
 
--- 17. P2P Detail (All stages joined)
+-- 18. P2P Detail (All stages joined)
 P2P_DETAIL AS (
     SELECT /*+ qb_name(P2P_DTL) MATERIALIZE */
            PRD.REQUISITION_NUMBER
@@ -297,7 +275,7 @@ P2P_DETAIL AS (
       AND  RCVM.TRANSACTION_ID = INVM.RCV_TRANSACTION_ID(+)
 )
 
--- 18. Final SELECT with all lookups and payments
+-- 19. Final SELECT with all lookups and payments
 SELECT /*+ LEADING(P2P) USE_HASH(P2P REQM BUYM SUPM BUM PAYM) */
        P2P.REQUISITION_NUMBER AS "Requisition Number"
       ,NVL(REQM.REQUESTER_NAME, 'Unknown') AS "Requester Name"
@@ -347,105 +325,4 @@ ORDER BY P2P.REQUISITION_NUMBER
         ,P2P.RECEIPT_NUMBER
         ,P2P.INVOICE_NUMBER
         ,PAYM.PAYMENT_NUMBER
-```
-
----
-
-## 2. Goods Received Notes (GRN) Report
-*Receipt tracking with PO and Invoice matching.*
-
-```sql
-/*
-TITLE: Goods Received Notes (GRN) Report
-PURPOSE: Track receipts and match with POs and Invoices (2-way, 3-way match)
-NOTE: This query shows GRN status for work confirmation and standard POs
-*/
-
--- See detailed implementation in Procure to Pay template above
--- Key differences:
--- 1. Focus on GRN status logic
--- 2. Work confirmation integration
--- 3. Match validation (validated vs pending)
-```
-
----
-
-## 3. Supplier Evaluation Report
-*Supplier qualification and performance tracking.*
-
-```sql
-/*
-TITLE: Supplier Evaluation Report
-PURPOSE: Track supplier qualifications and performance evaluation
-MODULES: Supplier Qualification
-PARAMETERS: None (shows all suppliers)
-*/
-
-SELECT 
-       PABUV.BU_NAME AS PROCUREMENT_BU
-      ,PI.INITIATIVE_NUMBER
-      ,PI.TITLE AS INITIATIVE_TITLE
-      ,PI.LAUNCH_DATE AS INITIATIVE_LAUNCH_DATE
-      ,PQ.STATUS
-      ,PSV.SEGMENT1 AS SUPPLIER_NUMBER
-      ,PSV.VENDOR_NAME AS SUPPLIER_NAME
-      ,PSSAM.VENDOR_SITE_CODE AS SUPPLIER_SITE
-      ,PPNF2.FULL_NAME AS INTERNAL_REPONDER
-      ,PQ.QUALIFICATION_NUMBER
-      ,PQ.QUALIFICATION_NAME
-      ,PQ.EFFECTIVE_START_DATE AS QUALIFICATION_START_DATE
-      ,PQ.EFFECTIVE_END_DATE AS QUALIFICATION_END_DATE
-      ,PQ.QUALIFICATION_SCORE
-      ,PQ.QUALIFICATION_OUTCOME
-      ,PQ.QUALIFICATION_COMMENTS AS COMMENTS
-      ,PPNF1.DISPLAY_NAME AS EVALUATED_BY
-      ,PQ.EVALUATION_DATE
-      ,PIS.INTERNAL_RESPONDER_ID
-FROM   POQ_INITIATIVES PI
-      ,POQ_QUALIFICATIONS PQ
-      ,POQ_INITIATIVE_SUPPLIERS PIS
-      ,POZ_SUPPLIERS_V PSV
-      ,POZ_SUPPLIER_SITES_ALL_M PSSAM
-      ,PER_PERSON_NAMES_F PPNF1
-      ,FUN_ALL_BUSINESS_UNITS_V PABUV
-      ,PER_PERSON_NAMES_F PPNF2
-WHERE  PI.INITIATIVE_ID = PQ.INITIATIVE_ID
-  AND  PQ.SUPPLIER_ID = PIS.SUPPLIER_ID
-  AND  PQ.INITIATIVE_ID = PIS.INITIATIVE_ID
-  AND  PIS.SUPPLIER_ID = PSV.VENDOR_ID
-  AND  PSV.VENDOR_ID = PSSAM.VENDOR_ID(+)
-  AND  PQ.SUPPLIER_SITE_ID = PSSAM.VENDOR_SITE_ID(+)
-  AND  PQ.EVALUATED_BY = PPNF1.PERSON_ID
-  AND  PQ.PRC_BU_ID = PABUV.BU_ID
-  AND  PIS.INTERNAL_RESPONDER_ID = PPNF2.PERSON_ID(+)
-  AND  PPNF1.NAME_TYPE = 'GLOBAL'
-  AND  PPNF2.NAME_TYPE = 'GLOBAL'
-  AND  TRUNC(SYSDATE) BETWEEN PSSAM.EFFECTIVE_START_DATE(+) AND PSSAM.EFFECTIVE_END_DATE(+)
-  AND  TRUNC(SYSDATE) BETWEEN PPNF1.EFFECTIVE_START_DATE AND PPNF1.EFFECTIVE_END_DATE
-  AND  TRUNC(SYSDATE) BETWEEN PPNF2.EFFECTIVE_START_DATE AND PPNF2.EFFECTIVE_END_DATE
-ORDER BY PI.INITIATIVE_NUMBER, PSV.VENDOR_NAME
-```
-
----
-
-## 4. Work Confirmation Tracking Report
-*Track work confirmation for service-based POs with receipts and invoices.*
-
-```sql
-/*
-TITLE: Work Confirmation Tracking Report
-PURPOSE: Track work confirmations with GRN matching
-NOTE: See Work Confirmation Report in PO_TEMPLATES.md for detailed implementation
-*/
-
--- Key Integration:
--- PO → Work Confirmation → Receipt → Invoice
--- Uses WORK_CONFIRMATION_MASTER CTE from PO_REPOSITORIES.md
-```
-
----
-
-**Templates Count:** 3 primary cross-module templates  
-**Coverage:** P2P, GRN, Supplier Evaluation  
-**Last Updated:** 22-12-25
 

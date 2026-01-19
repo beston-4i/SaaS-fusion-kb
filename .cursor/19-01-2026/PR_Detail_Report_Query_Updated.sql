@@ -1,0 +1,136 @@
+/*
+TITLE: PR Detail Report
+PURPOSE: Detailed Purchase Requisition listing with Requisition Number, Requester Name, Description, Creation Date, Status, Amount, PO Number, Charge Account, and Supplier Name
+PARAMETERS:
+  - :P_PR_FROM_DATE - Requisition Creation From Date (Required)
+  - :P_PR_TO_DATE - Requisition Creation To Date (Required)
+  - :P_REQUESTER_NAME - Requester Name (Optional, uses NVL for filtering)
+AUTHOR: AI Agent
+DATE: 19-01-2026
+*/
+
+WITH
+-- 1. Requisition Master (filtered by date range)
+PR_MASTER AS (
+    SELECT /*+ qb_name(PR_MST) MATERIALIZE PARALLEL(2) */
+           PRHA.REQUISITION_HEADER_ID
+          ,PRHA.REQUISITION_NUMBER
+          ,PRHA.DESCRIPTION AS PR_DESCRIPTION
+          ,PRHA.CREATION_DATE AS PR_CREATION_DATE
+          ,PRHA.DOCUMENT_STATUS AS PR_STATUS_CODE
+          ,PRHA.REQ_BU_ID
+    FROM   POR_REQUISITION_HEADERS_ALL PRHA
+    WHERE  TRUNC(PRHA.CREATION_DATE) BETWEEN TRUNC(:P_PR_FROM_DATE) 
+                                        AND TRUNC(:P_PR_TO_DATE)
+),
+
+-- 2. Requisition Lines with Amounts
+PR_LINES AS (
+    SELECT /*+ qb_name(PR_LN) MATERIALIZE PARALLEL(2) */
+           PRLA.REQUISITION_HEADER_ID
+          ,PRLA.REQUISITION_LINE_ID
+          ,PRLA.LINE_NUMBER
+          ,PRLA.REQUESTER_ID
+          ,PRLA.PO_HEADER_ID
+          ,ROUND(NVL(PRLA.ASSESSABLE_VALUE, 
+                CASE 
+                    WHEN PRLA.CURRENCY_UNIT_PRICE IS NOT NULL AND PRLA.QUANTITY IS NOT NULL 
+                    THEN (PRLA.CURRENCY_UNIT_PRICE * PRLA.QUANTITY * NVL(PRLA.RATE, 1))
+                    ELSE NVL(PRLA.CURRENCY_AMOUNT, 0) * NVL(PRLA.RATE, 1)
+                END), 2) AS REQUISITION_AMOUNT
+    FROM   POR_REQUISITION_LINES_ALL PRLA
+),
+
+-- 3. Requisition Distributions
+PR_DISTRIBUTIONS AS (
+    SELECT /*+ qb_name(PR_DIST) MATERIALIZE */
+           PRDA.REQUISITION_LINE_ID
+          ,PRDA.DISTRIBUTION_NUMBER
+          ,PRDA.CODE_COMBINATION_ID
+          ,PRDA.REQ_BU_ID
+    FROM   POR_REQ_DISTRIBUTIONS_ALL PRDA
+),
+
+-- 4. Requester Master (Date-Effective)
+REQUESTER_MASTER AS (
+    SELECT /*+ qb_name(REQ_MST) MATERIALIZE */
+           PPNF.PERSON_ID
+          ,PPNF.FIRST_NAME || ' ' || PPNF.LAST_NAME AS REQUESTER_NAME
+    FROM   PER_PERSON_NAMES_F PPNF
+    WHERE  PPNF.NAME_TYPE = 'GLOBAL'
+      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) 
+                              AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+),
+
+-- 5. PR Status Lookup
+PR_STATUS_LOOKUP AS (
+    SELECT /*+ qb_name(PR_STAT) MATERIALIZE */
+           FLVT.LOOKUP_CODE
+          ,FLVT.MEANING AS PR_STATUS
+    FROM   FND_LOOKUP_VALUES_TL FLVT
+    WHERE  FLVT.LOOKUP_TYPE = 'POR_DOCUMENT_STATUS'
+      AND  FLVT.VIEW_APPLICATION_ID = 0
+      AND  FLVT.SET_ID = 0
+      AND  FLVT.LANGUAGE = USERENV('LANG')
+),
+
+-- 6. PO Master (for PO Number and Supplier)
+PO_MASTER AS (
+    SELECT /*+ qb_name(PO_MST) MATERIALIZE */
+           PHA.PO_HEADER_ID
+          ,PHA.SEGMENT1 AS PO_NUMBER
+          ,PHA.VENDOR_ID
+    FROM   PO_HEADERS_ALL PHA
+),
+
+-- 7. Supplier Master
+SUPPLIER_MASTER AS (
+    SELECT /*+ qb_name(SUPP_MST) MATERIALIZE */
+           PSV.VENDOR_ID
+          ,PSV.VENDOR_NAME AS SUPPLIER_NAME
+    FROM   POZ_SUPPLIERS_V PSV
+),
+
+-- 8. COA Master (Manual Concatenation - safer than CONCATENATED_SEGMENTS)
+COA_MASTER AS (
+    SELECT /*+ qb_name(COA_MST) MATERIALIZE */
+           GCC.CODE_COMBINATION_ID
+          ,GCC.SEGMENT1 || '.' || GCC.SEGMENT2 || '.' || GCC.SEGMENT3 || '.' 
+           || GCC.SEGMENT4 || '.' || GCC.SEGMENT5 || '.' || GCC.SEGMENT6 || '.' 
+           || NVL(GCC.SEGMENT7, '') || '.' || NVL(GCC.SEGMENT8, '') AS CHARGE_ACCOUNT
+    FROM   GL_CODE_COMBINATIONS GCC
+)
+
+-- 9. Final SELECT
+SELECT /*+ LEADING(PRM PRL) USE_HASH(PRL PRD) */
+       PRM.REQUISITION_NUMBER AS "Requisition Number"
+      ,NVL(REQM.REQUESTER_NAME, 'Unknown') AS "Requester Name"
+      ,REGEXP_REPLACE(PRM.PR_DESCRIPTION, '[[:space:]]+', ' ') AS "Requisition Header Description"
+      ,TO_CHAR(PRM.PR_CREATION_DATE, 'YYYY-MM-DD') AS "Requisition Creation Date"
+      ,NVL(PRSL.PR_STATUS, PRM.PR_STATUS_CODE) AS "Requisition Status"
+      ,NVL(PRL.REQUISITION_AMOUNT, 0) AS "Requisition Amount"
+      ,POM.PO_NUMBER AS "Purchase Order Number"
+      ,NVL(COAM.CHARGE_ACCOUNT, 'N/A') AS "Charge Account"
+      ,NVL(SUPM.SUPPLIER_NAME, 'N/A') AS "Supplier Name"
+FROM   PR_MASTER PRM
+      ,PR_LINES PRL
+      ,PR_DISTRIBUTIONS PRD
+      ,REQUESTER_MASTER REQM
+      ,PR_STATUS_LOOKUP PRSL
+      ,PO_MASTER POM
+      ,SUPPLIER_MASTER SUPM
+      ,COA_MASTER COAM
+WHERE  PRM.REQUISITION_HEADER_ID = PRL.REQUISITION_HEADER_ID
+  AND  PRL.REQUISITION_LINE_ID = PRD.REQUISITION_LINE_ID(+)
+  AND  PRM.REQ_BU_ID = PRD.REQ_BU_ID(+)  -- Multi-tenant join
+  AND  PRL.REQUESTER_ID = REQM.PERSON_ID(+)
+  AND  PRM.PR_STATUS_CODE = PRSL.LOOKUP_CODE(+)
+  AND  PRL.PO_HEADER_ID = POM.PO_HEADER_ID(+)
+  AND  POM.VENDOR_ID = SUPM.VENDOR_ID(+)
+  AND  PRD.CODE_COMBINATION_ID = COAM.CODE_COMBINATION_ID(+)
+  -- Requester Name Filter with NVL (optional parameter)
+  AND  REQM.REQUESTER_NAME = NVL(:P_REQUESTER_NAME, REQM.REQUESTER_NAME)
+ORDER BY PRM.REQUISITION_NUMBER
+        ,PRL.LINE_NUMBER
+        ,NVL(PRD.DISTRIBUTION_NUMBER, 0)
+

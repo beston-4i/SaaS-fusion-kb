@@ -1,13 +1,3 @@
-# Sourcing/Negotiations Templates
-
-**Purpose:** Standard report patterns for Negotiation/Sourcing queries.
-
----
-
-## 1. Negotiation Detailed Report
-*Comprehensive negotiation details with requisition, line-level, and pricing information.*
-
-```sql
 /*
 TITLE: Negotiation Detailed Report
 PURPOSE: Comprehensive negotiation details with requisition, line-level, and pricing information
@@ -120,14 +110,3 @@ SELECT /*+ LEADING(NDF) */
 FROM   NEGOTIATION_DETAILED_FINAL NDF
 ORDER BY NDF.NEGOTIATION_NUMBER
         ,NDF.NEGOTIATION_LINE_NUMBER
-```
-
-**Key Patterns:**
-- Use `PON_AUCTION_ITEM_PRICES_ALL` (NOT `PON_AUCTION_LINES_ALL`)
-- Use `OPEN_BIDDING_DATE` and `CLOSE_BIDDING_DATE` (NOT `OPEN_DATE` and `CLOSE_DATE`)
-- PR Number: Direct from `PON_AUCTION_ITEM_PRICES_ALL.REQUISITION_NUMBER` (no join required)
-- Join to `POR_REQUISITION_HEADERS_ALL` only for BU filtering/display
-- Use `ITEM_DESCRIPTION`, `ORDER_TYPE_LOOKUP_CODE`, `REQUESTED_DELIVERY_DATE`, `CURRENT_PRICE`
-
----
-
