@@ -19,249 +19,166 @@
 3.  **Distributions (Accounts):**
     *   **Rule:** Join `PO_DISTRIBUTIONS_ALL` for Cost Centers and Project info.
 
+4.  **Buyer/Agent Column (CRITICAL):**
+    *   **Rule:** Use `PO_HEADERS_ALL.AGENT_ID` (NOT `BUYER_ID`)
+    *   **Why:** `BUYER_ID` does not exist in `PO_HEADERS_ALL`. `AGENT_ID` links to `PER_ALL_PEOPLE_F.PERSON_ID` for buyer information.
+
+5.  **Payment Terms Table (CRITICAL):**
+    *   **Rule:** Use `AP_TERMS` table (NOT `AP_TERMS_NAME`)
+    *   **Column:** `AP_TERMS.NAME` (NOT `TERM_NAME`)
+    *   **Join:** `PO_HEADERS_ALL.TERMS_ID = AP_TERMS.TERM_ID`
+
+6.  **Purchase Requisition Table (CRITICAL):**
+    *   **Rule:** Use `POR_REQUISITION_HEADERS_ALL` (NOT `PO_REQUISITION_HEADERS_ALL`)
+    *   **PR Number Column:** `POR_REQUISITION_HEADERS_ALL.REQUISITION_NUMBER` (NOT `SEGMENT1`)
+
+7.  **PO to PR Link (CRITICAL):**
+    *   **Rule:** Join PO and PR through distribution tables:
+    *   **Path:** `PO_DISTRIBUTIONS_ALL.REQ_DISTRIBUTION_ID` = `POR_REQ_DISTRIBUTIONS_ALL.DISTRIBUTION_ID`
+    *   Then: `POR_REQ_DISTRIBUTIONS_ALL.REQUISITION_LINE_ID` = `POR_REQUISITION_LINES_ALL.REQUISITION_LINE_ID`
+    *   Then: `POR_REQUISITION_LINES_ALL.REQUISITION_HEADER_ID` = `POR_REQUISITION_HEADERS_ALL.REQUISITION_HEADER_ID`
+    *   **Why:** `PO_LINES_ALL` does NOT have `REQUISITION_HEADER_ID` or `REQ_HEADER_ID` columns.
+
+8.  **Recoverable Tax Amount (CRITICAL):**
+    *   **Rule:** Tax is stored in `PO_DISTRIBUTIONS_ALL.RECOVERABLE_TAX` (NOT in `PO_LINE_LOCATIONS_ALL`)
+    *   **Calculation:** Sum `RECOVERABLE_TAX` from distributions grouped by `PO_HEADER_ID`, `PO_LINE_ID`, `LINE_LOCATION_ID`
+
+9.  **Supplier Contact Columns:**
+    *   **Rule:** Use `POZ_SUPPLIER_CONTACTS_V.FULL_NAME` for contact name (NOT `CONTACT_NAME`)
+    *   **Email:** `POZ_SUPPLIER_CONTACTS_V.EMAIL_ADDRESS`
+    *   **Note:** No `PRIMARY_FLAG` or `CONTACT_ID` columns exist in this view.
+
+10. **Supplier Site Address:**
+    *   **Rule:** Address columns available: `ADDRESS_LINE1`, `ADDRESS_LINE2`, `ADDRESS_LINE3`, `CITY`, `STATE`, `COUNTRY`
+    *   **Note:** No `POSTAL_CODE` or `ZIP_CODE` column exists in `POZ_SUPPLIER_SITES_V`
+
+11. **Purchase Requisition Status Column (CRITICAL):**
+    *   **Rule:** Use `POR_REQUISITION_HEADERS_ALL.DOCUMENT_STATUS` (NOT `STATUS_CODE`)
+    *   **Why:** The correct column name for PR status is `DOCUMENT_STATUS`, not `STATUS_CODE`
+
+12. **PR Amount Calculation (CRITICAL):**
+    *   **Rule:** Use `POR_REQUISITION_LINES_ALL.ASSESSABLE_VALUE` with fallback logic
+    *   **Calculation:** `NVL(ASSESSABLE_VALUE, CASE WHEN CURRENCY_UNIT_PRICE IS NOT NULL AND QUANTITY IS NOT NULL THEN (CURRENCY_UNIT_PRICE * QUANTITY * NVL(RATE, 1)) ELSE NVL(CURRENCY_AMOUNT, 0) * NVL(RATE, 1) END)`
+    *   **Why:** `ASSESSABLE_VALUE` is the primary amount field, with fallback to calculated values
+
+13. **PR Line to PO Direct Link (CRITICAL):**
+    *   **Rule:** `POR_REQUISITION_LINES_ALL.PO_HEADER_ID` provides direct link to PO (if PR converted to PO)
+    *   **Why:** PR lines can have direct `PO_HEADER_ID` reference when converted to PO, in addition to distribution-level link
+
+14. **PR Distribution Charge Account (CRITICAL):**
+    *   **Rule:** Use `POR_REQ_DISTRIBUTIONS_ALL.CODE_COMBINATION_ID` (NOT `CHARGE_ACCOUNT_ID`)
+    *   **Why:** The column name is `CODE_COMBINATION_ID`, which links to `GL_CODE_COMBINATIONS.CODE_COMBINATION_ID`
+
+15. **PR Status Lookup (CRITICAL):**
+    *   **Rule:** Use `FND_LOOKUP_VALUES_TL` with `LOOKUP_TYPE = 'POR_DOCUMENT_STATUS'`
+    *   **Filter:** `VIEW_APPLICATION_ID = 0`, `SET_ID = 0`, `LANGUAGE = USERENV('LANG')`
+    *   **Why:** PR status meanings are stored in FND lookup, not directly in PR header table
+
+16. **PR Requester Name (CRITICAL):**
+    *   **Rule:** Can use `PER_PERSON_NAMES_F.FIRST_NAME || ' ' || PER_PERSON_NAMES_F.LAST_NAME` (alternative to `FULL_NAME`)
+    *   **Date-Effective:** Must filter `TRUNC(SYSDATE) BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE`
+    *   **Filter:** `NAME_TYPE = 'GLOBAL'`
+    *   **Why:** Both `FULL_NAME` and concatenated `FIRST_NAME || LAST_NAME` are valid, depending on requirements
+
+17. **PO Amount Calculation from Distributions (CRITICAL):**
+    *   **Rule:** Calculate PO amount as `(NONRECOVERABLE_TAX + TAX_EXCLUSIVE_AMOUNT) * RATE` from `PO_DISTRIBUTIONS_ALL`
+    *   **Alternative:** Can also use `AMOUNT` from `PO_LINE_LOCATIONS_ALL` or sum from distributions
+    *   **Why:** Distribution-level calculation provides more accurate amounts when tax is involved
+    *   **Note:** Multiply by `PO_HEADERS_ALL.RATE` if currency conversion is needed
+
+18. **PO Status Column Alternatives (CRITICAL):**
+    *   **Rule:** Can use either `PO_HEADERS_ALL.DOCUMENT_STATUS` or `PO_HEADERS_ALL.TYPE_LOOKUP_CODE` for PO status
+    *   **Why:** `DOCUMENT_STATUS` may be preferred in P2P reports, while `TYPE_LOOKUP_CODE` is used in standard PO reports
+    *   **Note:** Both columns exist and serve different purposes - choose based on report requirements
+
+19. **Buyer Name Column Alternatives (CRITICAL):**
+    *   **Rule:** Can use `PER_PERSON_NAMES_F.DISPLAY_NAME`, `FULL_NAME`, or `FIRST_NAME || ' ' || LAST_NAME`
+    *   **Why:** `DISPLAY_NAME` may be preferred in P2P reports, while `FULL_NAME` is standard
+    *   **Date-Effective:** All patterns require `TRUNC(SYSDATE) BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE` and `NAME_TYPE = 'GLOBAL'`
+
+20. **Business Unit Source Alternatives (CRITICAL):**
+    *   **Rule:** Can use `FUN_ALL_BUSINESS_UNITS_V` (Financial BU view) or `HR_ALL_ORGANIZATION_UNITS` (HR Org view)
+    *   **Financial BU:** `FUN_ALL_BUSINESS_UNITS_V.BU_ID` and `BU_NAME` - preferred for P2P/Financial reports
+    *   **HR Org:** `HR_ALL_ORGANIZATION_UNITS.ORGANIZATION_ID` and `NAME` - used in standard PO reports
+    *   **Why:** Financial BU view aligns with AP/AR modules and provides better integration for P2P reports
+
+21. **Supplier Address Table (CRITICAL):**
+    *   **Rule:** Use `POZ_SUPPLIER_ADDRESS_V` (separate from `POZ_SUPPLIER_SITES_V`) for address details
+    *   **Columns:** `ADDRESS1`, `ADDRESS2`, `CITY`, `PHONE_NUMBER`
+    *   **Join:** `POZ_SUPPLIER_SITES_V.PARTY_SITE_ID = POZ_SUPPLIER_ADDRESS_V.PARTY_SITE_ID`
+    *   **Why:** Address information is stored in a separate view from site information
+
+22. **Vendor Type Lookup (CRITICAL):**
+    *   **Rule:** Use `FND_LOOKUP_VALUES_TL` with `LOOKUP_TYPE = 'ORA_POZ_VENDOR_TYPE'` (NOT `'VENDOR_TYPE'`)
+    *   **Filter:** `VIEW_APPLICATION_ID = 0`, `SET_ID = 0`, `LANGUAGE = USERENV('LANG')`
+    *   **Why:** Supplier-specific vendor type lookup uses different lookup type than standard vendor type
+
+23. **Vendor Status Source (CRITICAL):**
+    *   **Rule:** Use `HZ_PARTIES.STATUS` for vendor status (NOT `POZ_SUPPLIERS_V.ENABLED_FLAG`)
+    *   **Join:** `POZ_SUPPLIERS_V.PARTY_ID = HZ_PARTIES.PARTY_ID`
+    *   **Status Values:** `'A'` = Active, `'I'` = Inactive
+    *   **Decode:** `DECODE(HP.STATUS, 'A', 'Active', 'I', 'Inactive', 'Inactive')`
+    *   **Why:** Party-level status provides more accurate vendor status than supplier-level enabled flag
+
+24. **Tax Profile Table (CRITICAL):**
+    *   **Rule:** Use `ZX_PARTY_TAX_PROFILE` for tax registration and classification (NOT `ZX_REGISTRATIONS`)
+    *   **Columns:** `REP_REGISTRATION_NUMBER` (tax registration number), `TAX_CLASSIFICATION_CODE`
+    *   **Join:** `POZ_SUPPLIERS_V.PARTY_ID = ZX_PARTY_TAX_PROFILE.PARTY_ID`
+    *   **Why:** Party tax profile is the primary source for supplier tax information
+
+25. **Business Classifications for Trade License (CRITICAL):**
+    *   **Rule:** Use `POZ_BUSINESS_CLASSIFICATIONS_V` to retrieve trade license number
+    *   **Filter:** `STATUS = 'A'` for active classifications
+    *   **Pattern:** Search for classifications where `DISPLAYED_FIELD` or `CERTIFYING_AGENCY` contains 'TRADE LICENSE' or 'LICENSE'
+    *   **Column:** `CERTIFICATE_NUMBER` contains the trade license number
+    *   **Why:** Trade license is stored as a business classification, not as a direct attribute
+
+26. **Supplier Bank Account Join Pattern (CRITICAL):**
+    *   **Rule:** Join `IBY_EXT_BANK_ACCOUNTS` via `IBY_ACCOUNT_OWNERS`, `IBY_EXTERNAL_PAYEES_ALL`, and `IBY_PMT_INSTR_USES_ALL`
+    *   **Path:** `IBY_EXT_BANK_ACCOUNTS.EXT_BANK_ACCOUNT_ID = IBY_ACCOUNT_OWNERS.EXT_BANK_ACCOUNT_ID`
+    *   Then: `IBY_ACCOUNT_OWNERS.ACCOUNT_OWNER_PARTY_ID = IBY_EXTERNAL_PAYEES_ALL.PAYEE_PARTY_ID`
+    *   Then: `IBY_ACCOUNT_OWNERS.EXT_BANK_ACCOUNT_ID = IBY_PMT_INSTR_USES_ALL.INSTRUMENT_ID`
+    *   Then: `IBY_EXTERNAL_PAYEES_ALL.EXT_PAYEE_ID = IBY_PMT_INSTR_USES_ALL.EXT_PMT_PARTY_ID`
+    *   **Filter:** `IBY_ACCOUNT_OWNERS.PRIMARY_FLAG = 'Y'` for primary bank account
+    *   **Bank Details:** Join `IBY_EXT_BANK_ACCOUNTS.BANK_ID = CE_BANKS_V.BANK_PARTY_ID` for bank name and number
+    *   **Why:** Supplier bank accounts require complex join through multiple IBY tables to link to supplier party
+
+27. **Payment Terms Translated Table (CRITICAL):**
+    *   **Rule:** Use `AP_TERMS_TL` (translated table) instead of `AP_TERMS` for multilingual support
+    *   **Filter:** `AP_TERMS_TL.LANGUAGE = USERENV('LANG')`
+    *   **Column:** `AP_TERMS_TL.NAME` for payment term name
+    *   **Join:** `POZ_SUPPLIER_SITES_V.TERMS_ID = AP_TERMS_TL.TERM_ID`
+    *   **Why:** Translated table provides payment term names in user's language
+
 ---
 
 ## 2. 🗺️ Schema Map
 
-### Core PO Tables
 | Alias | Table Name | Purpose |
 |-------|------------|---------|
-| **PHA** | `PO_HEADERS_ALL` | PO Header (Supplier, Number, Currency, Rates) |
-| **PLA** | `PO_LINES_ALL` | PO Line (Item, Price, Quantity, Description) |
-| **PLLA** | `PO_LINE_LOCATIONS_ALL`| Shipment/Schedule (Qty Ordered, Qty Received, Need By Date) |
-| **PDA** | `PO_DISTRIBUTIONS_ALL` | GL Account, Project coding, Charge Accounts, Tax |
-| **PLTB** | `PO_LINE_TYPES_V` | Line Type (Item, Amount based) |
-| **PDSH** | `PO_DOC_STYLE_HEADERS` | Document style |
-| **PDSLB** | `PO_DOC_STYLE_LINES_B` | Document style lines base |
-| **PDSLT** | `PO_DOC_STYLE_LINES_TL` | Document style lines translated |
-
-### Approval & Action History
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PAH** | `PO_ACTION_HISTORY` | PO approval workflow and action history |
-
-### Supplier Tables  
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PSV** | `POZ_SUPPLIERS_V` | Supplier master (Vendor Name, Site, Party) |
-| **PSSV** | `POZ_SUPPLIER_SITES_V` | Supplier site details |
-| **PSSAM** | `POZ_SUPPLIER_SITES_ALL_M` | Supplier site additional details |
-| **PSAV** | `POZ_SUPPLIER_ADDRESS_V` | Supplier address information |
-| **PASCV** | `POZ_ALL_SUPPLIER_CONTACTS_V` | Supplier contact information |
-| **PBCV** | `POZ_BUSINESS_CLASSIFICATIONS_V` | Business classifications |
-| **ZPTP** | `ZX_PARTY_TAX_PROFILE` | Party tax profile |
-| **ZR** | `ZX_REGISTRATIONS` | Tax registrations |
-
-### Requisition Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PRHA** | `POR_REQUISITION_HEADERS_ALL` | Requisition Header |
-| **PRLA** | `POR_REQUISITION_LINES_ALL` | Requisition Lines |
-| **PRDA** | `POR_REQ_DISTRIBUTIONS_ALL` | Requisition Distributions |
-
-### Receiving Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **RSH** | `RCV_SHIPMENT_HEADERS` | Receipt header |
-| **RSL** | `RCV_SHIPMENT_LINES` | Receipt lines |
-| **RT** | `RCV_TRANSACTIONS` | Receipt transactions |
-
-### Negotiation Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PAHA** | `PON_AUCTION_HEADERS_ALL` | Negotiation/Tender header |
-| **PBH** | `PON_BID_HEADERS` | Bid headers from suppliers |
-| **PBR** | `PON_BACKING_REQUISITIONS` | Requisitions backing negotiations |
-| **PAIPA** | `PON_AUCTION_ITEM_PRICES_ALL` | Auction item pricing |
-| **PBP** | `PON_BIDDING_PARTIES` | Suppliers invited to bid |
-| **PNST** | `PON_NEGOTIATION_STYLES_TL` | Negotiation style (Open, Limited tender) |
-| **PBR** | `PON_BID_REQUIREMENTS` | Bid technical/commercial requirements |
-| **PRS** | `PON_REQUIREMENT_SECTIONS` | Requirement sections (Technical, Commercial) |
-| **PNAA** | `PON_NEG_AUDIT_ACTIVITIES` | Negotiation audit trail |
-| **PBPN** | `PON_BID_PO_NUMBERS` | Link between bid and PO |
-
-### Contract Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **OKHAB** | `OKC_K_HEADERS_ALL_B` | Contract header |
-
-### Work Confirmation Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PWH** | `PO_WC_HEADERS` | Work confirmation header |
-| **PWL** | `PO_WC_LINES` | Work confirmation lines |
-| **APTC** | `POR_APPROVAL_TASK_COMMENTS` | Approval task comments |
-
-### Supplier Qualification Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PI** | `POQ_INITIATIVES` | Supplier qualification initiatives |
-| **PQ** | `POQ_QUALIFICATIONS` | Supplier qualifications |
-| **PIS** | `POQ_INITIATIVE_SUPPLIERS` | Suppliers in qualification initiative |
-
-### Item & UOM Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **ESIV** | `EGP_SYSTEM_ITEMS_VL` | Item master with description |
-| **ESIB** | `EGP_SYSTEM_ITEMS_B` | Item master base |
-| **ECV** | `EGP_CATEGORIES_VL` | Item categories |
-| **IUOMV** | `INV_UNITS_OF_MEASURE_VL` | Unit of measure |
-
-### Financial & GL Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **GCC** | `GL_CODE_COMBINATIONS` | Chart of accounts combination |
-| **APT** | `AP_TERMS_TL` | Payment terms |
-| **FABUV** | `FUN_ALL_BUSINESS_UNITS_V` | Business unit details |
-
-### HCM Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **PPNF** | `PER_PERSON_NAMES_F` | Person names (Buyer, Requester, Approver) |
-| **PU** | `PER_USERS` | User details |
-| **PAAF** | `PER_ALL_ASSIGNMENTS_F` | Employee assignments |
-| **PD** | `PER_DEPARTMENTS` | Departments |
-| **PAPF** | `PER_ALL_PEOPLE_F` | Person details |
-| **HAPF** | `HR_ALL_POSITIONS_F_VL` | Position details |
-
-### Lookup Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **FLVV** | `FND_LOOKUP_VALUES_VL` | Lookup values (Status, Type) |
-| **FLVT** | `FND_LOOKUP_VALUES_TL` | Lookup values translated |
-
-### Bank Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **IEBA** | `IBY_EXT_BANK_ACCOUNTS` | External bank accounts |
-| **IAO** | `IBY_ACCOUNT_OWNERS` | Account owners |
-| **IEPA** | `IBY_EXTERNAL_PAYEES_ALL` | External payees |
-| **IPIUA** | `IBY_PMT_INSTR_USES_ALL` | Payment instrument uses |
-| **CE** | `CE_BANKS_V` | Banks |
-| **CBB** | `CE_BANK_BRANCHES_V` | Bank branches |
-
-### Party Tables
-| Alias | Table Name | Purpose |
-|-------|------------|---------|
-| **HP** | `HZ_PARTIES` | Trading partner parties |
-| **HZ** | `HZ_LOCATIONS` | Location information |
-| **PSAC** | `POZ_SUPPLIER_CONTACTS` | Supplier contacts |
-
----
-
-## 3. 🔑 Primary Key Fields
-
-- **PO_HEADERS_ALL:** `PO_HEADER_ID`
-- **PO_LINES_ALL:** `PO_LINE_ID`
-- **PO_LINE_LOCATIONS_ALL:** `LINE_LOCATION_ID`
-- **PO_DISTRIBUTIONS_ALL:** `PO_DISTRIBUTION_ID`
-- **POR_REQUISITION_HEADERS_ALL:** `REQUISITION_HEADER_ID`
-- **PON_AUCTION_HEADERS_ALL:** `AUCTION_HEADER_ID`
-- **POZ_SUPPLIERS_V:** `VENDOR_ID`
-- **PO_WC_HEADERS:** `WORK_CONFIRMATION_ID`
-
----
-
-## 4. 🚨 Critical Constraints & Business Rules
-
-### PO Status Filtering
-**Rule:** Filter by document status to get specific states
-```sql
-AND PHA.DOCUMENT_STATUS IN ('APPROVED', 'OPEN')
--- Common values: 'INCOMPLETE', 'APPROVED', 'OPEN', 'CLOSED', 'FINALLY CLOSED'
-```
-
-### Line Status Filtering
-**Rule:** Exclude cancelled lines
-```sql
-AND PLA.LINE_STATUS <> 'CANCELED'
-```
-
-### Cancelled Invoices
-**Rule:** Exclude cancelled dates where applicable
-```sql
-AND PHA.CANCEL_FLAG = 'N'
-AND NVL(PLLA.CANCEL_FLAG, 'N') = 'N'
-```
-
-### Multi-Tenant Context
-**Rule:** Always include BU or ORG context
-```sql
-AND PHA.PRC_BU_ID = :P_BU_ID
--- OR
-AND (FABUV.BU_NAME IN (:P_BU_NAME) OR 'ALL' IN (:P_BU_NAME || 'ALL'))
-```
-
-### Approval History - Latest Approver
-**Critical Pattern:** Get most recent approver using sequence number
-```sql
-AND PAH.SEQUENCE_NUM = (
-    SELECT MAX(PAH1.SEQUENCE_NUM) 
-    FROM PO_ACTION_HISTORY PAH1 
-    WHERE PAH1.OBJECT_ID = PAH.OBJECT_ID 
-    AND PAH1.ACTION_CODE = 'APPROVE'
-)
-```
-
-### Exchange Rate Handling
-**Rule:** Always default exchange rate to 1 if NULL
-```sql
-NVL(PHA.RATE, 1) AS EXCHANGE_RATE
-```
-
-### PO Amount Calculation
-**Rule:** Calculate PO amount from lines
-```sql
-CASE 
-    WHEN PLA.UNIT_PRICE IS NOT NULL AND PLA.QUANTITY IS NOT NULL 
-    THEN (PLA.UNIT_PRICE * PLA.QUANTITY)
-    ELSE PLA.LIST_PRICE 
-END AS LINE_AMOUNT
-```
-
-### UOM Display Logic
-**Critical Pattern:** Convert UOM codes to display values
-```sql
-CASE 
-    WHEN PLLA.UOM_CODE = 'Ea' THEN 'Each'
-    WHEN PLLA.UOM_CODE = 'MON' THEN 'Months'
-    WHEN PLLA.UOM_CODE = 'YRS' THEN 'Years'
-    ELSE PLLA.UOM_CODE
-END AS UOM
-```
-
-### Prepayment & Retainage Handling
-**Rule:** Track retainage on contracts
-```sql
-NVL(PLLA.RETAINAGE_RATE, 0) AS RETAINAGE_RATE
-NVL(PLLA.RETAINAGE_WITHHELD_AMOUNT, 0) AS RETAINAGE_WITHHELD
-NVL(PLLA.RETAINAGE_RELEASED_AMOUNT, 0) AS RETAINAGE_RELEASED
-```
-
-### Person Name Date-Effective Filtering
-**Critical:** Always filter by effective dates for person names
-```sql
-AND TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) 
-                       AND TRUNC(PPNF.EFFECTIVE_END_DATE)
-AND PPNF.NAME_TYPE = 'GLOBAL'
-```
-
-### Tax Calculation
-**Rule:** Calculate total with tax
-```sql
-NVL(PDA.NONRECOVERABLE_TAX, 0) + NVL(PDA.TAX_EXCLUSIVE_AMOUNT, 0) AS TOTAL_WITH_TAX
-```
-
-### Negotiation Status
-**Rule:** Get negotiation status using package function
-```sql
-PON_AUCTION_PKG.GET_AUCTION_STATUS_DISPLAY(PAHA.AUCTION_HEADER_ID, 'Y') AS TENDER_STATUS
-```
-
-### Work Confirmation Status
-**Rule:** Filter work confirmations by status
-```sql
-AND PWH.STATUS IN ('PENDING', 'APPROVED')
-```
+| **PHA** | `PO_HEADERS_ALL` | PO Header (Supplier, Number, AGENT_ID for Buyer) |
+| **PLA** | `PO_LINES_ALL` | PO Line (Item, Price, Description, UOM) |
+| **PLLA** | `PO_LINE_LOCATIONS_ALL`| Shipment (Qty Ordered, Qty Received, Amount, Need By Date) |
+| **PDA** | `PO_DISTRIBUTIONS_ALL` | GL Account, Project coding, REQ_DISTRIBUTION_ID, RECOVERABLE_TAX |
+| **PRDA** | `POR_REQ_DISTRIBUTIONS_ALL` | PR Distributions (links PO to PR via DISTRIBUTION_ID) |
+| **PRLA** | `POR_REQUISITION_LINES_ALL` | Requisition Lines (links to PR distributions) |
+| **PRHA**| `POR_REQUISITION_HEADERS_ALL` | Requisition Header (REQUISITION_NUMBER, DOCUMENT_STATUS, REQUESTER_ID) |
+| **PRLA** | `POR_REQUISITION_LINES_ALL` | Requisition Lines (ASSESSABLE_VALUE, CURRENCY_UNIT_PRICE, QUANTITY, PO_HEADER_ID) |
+| **PRDA** | `POR_REQ_DISTRIBUTIONS_ALL` | PR Distributions (CODE_COMBINATION_ID, DISTRIBUTION_NUMBER) |
+| **POS** | `POZ_SUPPLIERS_V` | Supplier Master (VENDOR_NAME, SEGMENT1 as Supplier Number, PARTY_ID, VENDOR_TYPE_LOOKUP_CODE, CREATION_DATE) |
+| **PSS** | `POZ_SUPPLIER_SITES_V` | Supplier Site (PARTY_SITE_NAME, PARTY_SITE_ID, TERMS_ID, PRC_BU_ID) |
+| **PSAV** | `POZ_SUPPLIER_ADDRESS_V` | Supplier Address (ADDRESS1, ADDRESS2, CITY, PHONE_NUMBER) |
+| **PSC** | `POZ_SUPPLIER_CONTACTS_V` | Supplier Contacts (FULL_NAME, EMAIL_ADDRESS) |
+| **PBCV** | `POZ_BUSINESS_CLASSIFICATIONS_V` | Business Classifications (CERTIFICATE_NUMBER, DISPLAYED_FIELD, CERTIFYING_AGENCY, STATUS) |
+| **HP** | `HZ_PARTIES` | Party Master (STATUS: 'A' = Active, 'I' = Inactive) |
+| **ZPTP** | `ZX_PARTY_TAX_PROFILE` | Tax Profile (REP_REGISTRATION_NUMBER, TAX_CLASSIFICATION_CODE) |
+| **IEBA** | `IBY_EXT_BANK_ACCOUNTS` | External Bank Accounts (BANK_ACCOUNT_NUM, BANK_ACCOUNT_NAME, BANK_ID) |
+| **IAO** | `IBY_ACCOUNT_OWNERS` | Account Owners (PRIMARY_FLAG, ACCOUNT_OWNER_PARTY_ID) |
+| **IEPA** | `IBY_EXTERNAL_PAYEES_ALL` | External Payees (PAYEE_PARTY_ID, SUPPLIER_SITE_ID, EXT_PAYEE_ID) |
+| **IPIUA** | `IBY_PMT_INSTR_USES_ALL` | Payment Instrument Uses (INSTRUMENT_ID, EXT_PMT_PARTY_ID) |
+| **CE** | `CE_BANKS_V` | Banks (BANK_NAME, BANK_NUMBER, BANK_PARTY_ID) |
+| **AT** | `AP_TERMS` | Payment Terms (TERM_ID, NAME) |
+| **APT** | `AP_TERMS_TL` | Payment Terms Translated (TERM_ID, NAME, LANGUAGE) |
+| **FLVT** | `FND_LOOKUP_VALUES_TL` | Lookups (POR_DOCUMENT_STATUS, ORA_POZ_VENDOR_TYPE) |
 
 ---

@@ -51,308 +51,378 @@ PO_OPEN_LINES AS (
 ---
 
 ## 3. Receiving Master
-*Retrieves Receipts and Deliveries.*
+*Retrieves Receipts and Deliveries. Two patterns available based on use case.*
+
+### Pattern A: Basic Receipt (Standard)
+*For standard receiving reports.*
 
 ```sql
 PO_RCV_MASTER AS (
     SELECT /*+ qb_name(RCV) MATERIALIZE */
            RSH.RECEIPT_NUM
           ,RT.TRANSACTION_DATE
-          ,RT.QUANTITY AS RECEIPY_QTY
+          ,RT.QUANTITY
           ,RT.PO_HEADER_ID
           ,RT.PO_LINE_ID
-          ,RSL.PO_DISTRIBUTION_ID
-          ,RT.TRANSACTION_ID
-          ,RT.PO_UNIT_PRICE
-          ,ROUND((CASE 
-              WHEN NVL(RSL.QUANTITY_DELIVERED, 0) <> 0 
+    FROM   RCV_TRANSACTIONS RT
+          ,RCV_SHIPMENT_HEADERS RSH
+    WHERE  RT.SHIPMENT_HEADER_ID = RSH.SHIPMENT_HEADER_ID
+      AND  RT.TRANSACTION_TYPE = 'DELIVER' -- Put away to stock
+)
+```
+
+### Pattern B: Receipt with Amount and RCV Link (P2P)
+*For P2P reports linking Receipts to Invoices via RCV_TRANSACTION_ID.*
+
+```sql
+RECEIPT_MASTER AS (
+    SELECT /*+ qb_name(RCV_MST) MATERIALIZE PARALLEL(2) */
+           RT.PO_HEADER_ID
+          ,RT.PO_LINE_ID
+          ,RT.PO_LINE_LOCATION_ID
+          ,RSH.RECEIPT_NUM AS RECEIPT_NUMBER
+          ,TO_CHAR(RT.TRANSACTION_DATE, 'YYYY-MM-DD') AS RECEIPT_DATE
+          ,ROUND(CASE 
+              WHEN RSL.QUANTITY_DELIVERED > 0 
               THEN (RT.QUANTITY * RT.PO_UNIT_PRICE)
-              ELSE RSL.AMOUNT_RECEIVED 
-            END), 2) AS RECEIPT_VALUE
+              ELSE NVL(RSL.AMOUNT_RECEIVED, 0)
+            END, 2) AS RECEIPT_AMOUNT
+          ,RT.TRANSACTION_ID
     FROM   RCV_TRANSACTIONS RT
           ,RCV_SHIPMENT_HEADERS RSH
           ,RCV_SHIPMENT_LINES RSL
     WHERE  RT.SHIPMENT_HEADER_ID = RSH.SHIPMENT_HEADER_ID
-      AND  RSL.SHIPMENT_LINE_ID = RT.SHIPMENT_LINE_ID
-      AND  RSH.SHIPMENT_HEADER_ID = RT.SHIPMENT_HEADER_ID
-      AND  RT.TRANSACTION_TYPE = 'RECEIVE' -- Receipt
+      AND  RT.SHIPMENT_LINE_ID = RSL.SHIPMENT_LINE_ID
+      AND  RT.TRANSACTION_TYPE = 'RECEIVE' -- Receipt transaction (NOT 'DELIVER')
 )
 ```
 
+**Key Differences:**
+- **Transaction Type:** `'RECEIVE'` for P2P (links to invoices), `'DELIVER'` for standard receiving
+- **RCV_SHIPMENT_LINES:** Required for accurate receipt amounts in P2P
+- **TRANSACTION_ID:** Critical for linking receipts to invoices via `AP_INVOICE_LINES_ALL.RCV_TRANSACTION_ID`
+
 ---
 
-## 4. PO Approval History
-*Retrieves PO approval workflow with approvers.*
+## 4. Supplier Contact Master
+*Retrieves supplier contacts (name and email) with one contact per vendor/site.*
 
 ```sql
-PO_APPROVER AS (
-    SELECT /*+ qb_name(PO_APPR) MATERIALIZE */
-           PAH.OBJECT_ID AS PO_HEADER_ID
-          ,PAH.ACTION_DATE AS APPROVAL_DATE
-          ,PPNF.DISPLAY_NAME AS APPROVER_NAME
-          ,PPNF.FULL_NAME AS APPROVER_FULL_NAME
-          ,PAH.ACTION_CODE
-          ,PAH.SEQUENCE_NUM
-          ,RANK() OVER (PARTITION BY PAH.OBJECT_ID ORDER BY PAH.ACTION_DATE) AS APPROVAL_RANK
-    FROM   PO_ACTION_HISTORY PAH
-          ,PER_PERSON_NAMES_F PPNF
-    WHERE  PAH.PERFORMER_ID = PPNF.PERSON_ID
-      AND  PAH.ACTION_CODE = 'APPROVE'
-      AND  PAH.OBJECT_TYPE_CODE = 'PO'
-      AND  PPNF.NAME_TYPE = 'GLOBAL'
-      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) 
-                              AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+SUPPLIER_CONTACT_MASTER AS (
+    SELECT /*+ qb_name(SUPP_CONT) MATERIALIZE */
+           VENDOR_ID
+          ,VENDOR_SITE_ID
+          ,CONTACT_NAME
+          ,SUPPLIER_EMAIL
+    FROM   (
+        SELECT PSC.VENDOR_ID
+              ,PSC.VENDOR_SITE_ID
+              ,PSC.FULL_NAME AS CONTACT_NAME
+              ,PSC.EMAIL_ADDRESS AS SUPPLIER_EMAIL
+              ,ROW_NUMBER() OVER (PARTITION BY PSC.VENDOR_ID, PSC.VENDOR_SITE_ID ORDER BY PSC.VENDOR_ID, PSC.VENDOR_SITE_ID) AS RN
+        FROM   POZ_SUPPLIER_CONTACTS_V PSC
+        WHERE  NVL(PSC.INACTIVE_DATE, SYSDATE + 1) > SYSDATE
+    )
+    WHERE  RN = 1
 )
 ```
 
 ---
 
-## 5. Requisition Master
-*Retrieves PR details with requester and approver.*
+## 5. PR Distribution Master (PO to PR Link)
+*Links PO distributions to PR via POR_REQ_DISTRIBUTIONS_ALL.*
+
+```sql
+PR_DISTRIBUTION_MASTER AS (
+    SELECT /*+ qb_name(PR_DIST) MATERIALIZE */
+           PRDA.DISTRIBUTION_ID
+          ,PRLA.REQUISITION_HEADER_ID
+          ,PRLA.REQUISITION_LINE_ID
+          ,PRLA.REQUESTER_ID
+          ,ROW_NUMBER() OVER (PARTITION BY PRDA.DISTRIBUTION_ID ORDER BY PRLA.REQUISITION_HEADER_ID) AS RN
+    FROM   POR_REQ_DISTRIBUTIONS_ALL PRDA
+          ,POR_REQUISITION_LINES_ALL PRLA
+    WHERE  PRDA.REQUISITION_LINE_ID = PRLA.REQUISITION_LINE_ID
+)
+```
+
+---
+
+## 6. PO Tax Aggregate
+*Sums recoverable tax from distributions per line location.*
+
+```sql
+PO_TAX_AGGREGATE AS (
+    SELECT /*+ qb_name(PO_TAX) MATERIALIZE */
+           PDA.PO_HEADER_ID
+          ,PDA.PO_LINE_ID
+          ,PDA.LINE_LOCATION_ID
+          ,SUM(NVL(PDA.RECOVERABLE_TAX, 0)) AS TOTAL_RECOVERABLE_TAX
+    FROM   PO_DISTRIBUTIONS_ALL PDA
+    GROUP BY PDA.PO_HEADER_ID
+            ,PDA.PO_LINE_ID
+            ,PDA.LINE_LOCATION_ID
+)
+```
+
+---
+
+## 7. PR Master (Header with Date Filter)
+*Retrieves PR headers filtered by creation date range.*
 
 ```sql
 PR_MASTER AS (
-    SELECT /*+ qb_name(PR_MST) MATERIALIZE */
+    SELECT /*+ qb_name(PR_MST) MATERIALIZE PARALLEL(2) */
            PRHA.REQUISITION_HEADER_ID
-          ,PRHA.REQUISITION_NUMBER AS PR_NUMBER
+          ,PRHA.REQUISITION_NUMBER
           ,PRHA.DESCRIPTION AS PR_DESCRIPTION
           ,PRHA.CREATION_DATE AS PR_CREATION_DATE
-          ,PRHA.APPROVED_DATE AS PR_APPROVED_DATE
-          ,PRHA.DOCUMENT_STATUS AS PR_STATUS
-          ,PRLA.REQUISITION_LINE_ID
-          ,PRLA.LINE_NUMBER AS PR_LINE_NO
-          ,PRLA.ITEM_DESCRIPTION AS PR_ITEM_DESC
-          ,PRLA.QUANTITY AS PR_QUANTITY
-          ,PRLA.CURRENCY_CODE AS PR_CURRENCY
-          ,PRLA.RATE AS PR_EXCHANGE_RATE
-          ,PRLA.PO_HEADER_ID
-          ,PRLA.PO_LINE_ID
-          ,PRDA.DISTRIBUTION_ID
-          ,PRDA.REQ_DISTRIBUTION_ID
-          ,ROUND(NVL(PRLA.ASSESSABLE_VALUE, 0), 2) AS PR_LINE_AMOUNT
+          ,PRHA.DOCUMENT_STATUS AS PR_STATUS_CODE
     FROM   POR_REQUISITION_HEADERS_ALL PRHA
-          ,POR_REQUISITION_LINES_ALL PRLA
-          ,POR_REQ_DISTRIBUTIONS_ALL PRDA
-    WHERE  PRHA.REQUISITION_HEADER_ID = PRLA.REQUISITION_HEADER_ID(+)
-      AND  PRLA.REQUISITION_LINE_ID = PRDA.REQUISITION_LINE_ID(+)
+    WHERE  TRUNC(PRHA.CREATION_DATE) BETWEEN TRUNC(:P_PR_FROM_DATE) 
+                                        AND TRUNC(:P_PR_TO_DATE)
 )
 ```
 
 ---
 
-## 6. PR Approval History
-*Retrieves PR approval workflow.*
+## 8. PR Lines with Amount Calculation
+*Retrieves PR lines with calculated amounts using ASSESSABLE_VALUE with fallback logic.*
 
 ```sql
-PR_APPROVER AS (
-    SELECT /*+ qb_name(PR_APPR) MATERIALIZE */
-           PAH.OBJECT_ID AS REQUISITION_HEADER_ID
-          ,PAH.ACTION_DATE AS APPROVAL_DATE
-          ,PPNF.DISPLAY_NAME AS APPROVER_NAME
-          ,PPNF.FULL_NAME AS APPROVER_FULL_NAME
-          ,RANK() OVER (PARTITION BY PAH.OBJECT_ID ORDER BY PAH.ACTION_DATE) AS APPROVAL_RANK
-    FROM   PO_ACTION_HISTORY PAH
-          ,PER_PERSON_NAMES_F PPNF
-    WHERE  PAH.PERFORMER_ID = PPNF.PERSON_ID
-      AND  PAH.ACTION_CODE = 'APPROVE'
-      AND  PAH.OBJECT_TYPE_CODE = 'REQ'
-      AND  PPNF.NAME_TYPE = 'GLOBAL'
-      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) 
-                              AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+PR_LINES AS (
+    SELECT /*+ qb_name(PR_LN) MATERIALIZE PARALLEL(2) */
+           PRLA.REQUISITION_HEADER_ID
+          ,PRLA.REQUISITION_LINE_ID
+          ,PRLA.LINE_NUMBER
+          ,PRLA.REQUESTER_ID
+          ,PRLA.PO_HEADER_ID
+          ,ROUND(NVL(PRLA.ASSESSABLE_VALUE, 
+                CASE 
+                    WHEN PRLA.CURRENCY_UNIT_PRICE IS NOT NULL AND PRLA.QUANTITY IS NOT NULL 
+                    THEN (PRLA.CURRENCY_UNIT_PRICE * PRLA.QUANTITY * NVL(PRLA.RATE, 1))
+                    ELSE NVL(PRLA.CURRENCY_AMOUNT, 0) * NVL(PRLA.RATE, 1)
+                END), 2) AS REQUISITION_AMOUNT
+    FROM   POR_REQUISITION_LINES_ALL PRLA
 )
 ```
 
 ---
 
-## 7. Supplier Master
-*Comprehensive supplier details with contact and bank info.*
+## 9. PR Distributions (Charge Account)
+*Retrieves PR distributions with charge account (CODE_COMBINATION_ID).*
 
 ```sql
-SUPPLIER_MASTER AS (
-    SELECT /*+ qb_name(SUPP_MST) MATERIALIZE */
-           PSV.VENDOR_ID
-          ,PSV.SEGMENT1 AS SUPPLIER_NUMBER
-          ,PSV.VENDOR_NAME AS SUPPLIER_NAME
-          ,PSV.VENDOR_TYPE_LOOKUP_CODE AS SUPPLIER_TYPE
-          ,PSV.ATTRIBUTE_NUMBER1 AS ICV_PERCENTAGE
-          ,PSV.ATTRIBUTE1 AS BUSINESS_SIZE
-          ,PSSV.VENDOR_SITE_ID
-          ,PSSV.VENDOR_SITE_CODE
-          ,PSAV.ADDRESS1 AS ADDR_LINE1
-          ,PSAV.ADDRESS2 AS ADDR_LINE2
-          ,PSAV.CITY
-          ,PSAV.POSTAL_CODE
-          ,PSAV.COUNTRY
-          ,PSAV.EMAIL_ADDRESS
-          ,PSAV.PHONE_NUMBER
-          ,ZPTP.REP_REGISTRATION_NUMBER AS TAX_REGISTRATION
-    FROM   POZ_SUPPLIERS_V PSV
-          ,POZ_SUPPLIER_SITES_V PSSV
-          ,POZ_SUPPLIER_ADDRESS_V PSAV
-          ,ZX_PARTY_TAX_PROFILE ZPTP
-    WHERE  PSV.VENDOR_ID = PSSV.VENDOR_ID(+)
-      AND  PSV.VENDOR_ID = PSAV.VENDOR_ID(+)
-      AND  PSAV.PARTY_SITE_ID(+) = PSSV.PARTY_SITE_ID
-      AND  PSV.PARTY_ID = ZPTP.PARTY_ID(+)
+PR_DISTRIBUTIONS AS (
+    SELECT /*+ qb_name(PR_DIST) MATERIALIZE */
+           PRDA.REQUISITION_LINE_ID
+          ,PRDA.DISTRIBUTION_NUMBER
+          ,PRDA.CODE_COMBINATION_ID
+    FROM   POR_REQ_DISTRIBUTIONS_ALL PRDA
 )
 ```
 
 ---
 
-## 8. Buyer/Agent Master
-*Retrieves buyer/agent details.*
-
-```sql
-BUYER_MASTER AS (
-    SELECT /*+ qb_name(BUYER_MST) MATERIALIZE */
-           PPNF.PERSON_ID
-          ,PPNF.DISPLAY_NAME AS BUYER_NAME
-          ,PPNF.FIRST_NAME || ' ' || PPNF.LAST_NAME AS BUYER_FULL_NAME
-          ,PU.USERNAME AS BUYER_ID
-    FROM   PER_PERSON_NAMES_F PPNF
-          ,PER_USERS PU
-    WHERE  PPNF.PERSON_ID = PU.PERSON_ID
-      AND  PPNF.NAME_TYPE = 'GLOBAL'
-      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) 
-                              AND TRUNC(PPNF.EFFECTIVE_END_DATE)
-)
-```
-
----
-
-## 9. Requester/Department Master
-*Retrieves requester with department details.*
+## 10. PR Requester Master (Date-Effective)
+*Retrieves requester names with date-effective filtering. Supports both FULL_NAME and FIRST_NAME || LAST_NAME patterns.*
 
 ```sql
 REQUESTER_MASTER AS (
     SELECT /*+ qb_name(REQ_MST) MATERIALIZE */
            PPNF.PERSON_ID
           ,PPNF.FIRST_NAME || ' ' || PPNF.LAST_NAME AS REQUESTER_NAME
-          ,PU.USERNAME AS REQUESTER_ID
-          ,PD.NAME AS REQUESTER_DEPARTMENT
-          ,PAPF.PERSON_NUMBER AS EMPLOYEE_NUMBER
     FROM   PER_PERSON_NAMES_F PPNF
-          ,PER_USERS PU
-          ,PER_ALL_ASSIGNMENTS_F PAAF
-          ,PER_DEPARTMENTS PD
-          ,PER_ALL_PEOPLE_F PAPF
-    WHERE  PPNF.PERSON_ID = PU.PERSON_ID
-      AND  PPNF.PERSON_ID = PAAF.PERSON_ID
-      AND  PAAF.ORGANIZATION_ID = PD.ORGANIZATION_ID
-      AND  PAPF.PERSON_ID = PPNF.PERSON_ID
-      AND  PPNF.NAME_TYPE = 'GLOBAL'
-      AND  PAAF.PRIMARY_ASSIGNMENT_FLAG = 'Y'
-      AND  PAAF.ASSIGNMENT_TYPE IN ('E', 'C')
+    WHERE  PPNF.NAME_TYPE = 'GLOBAL'
       AND  TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) 
                               AND TRUNC(PPNF.EFFECTIVE_END_DATE)
-      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) 
-                              AND TRUNC(PAAF.EFFECTIVE_END_DATE)
-      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PD.EFFECTIVE_START_DATE) 
-                              AND TRUNC(PD.EFFECTIVE_END_DATE)
-      AND  TRUNC(SYSDATE) BETWEEN TRUNC(PAPF.EFFECTIVE_START_DATE) 
-                              AND TRUNC(PAPF.EFFECTIVE_END_DATE)
 )
 ```
 
 ---
 
-## 10. Negotiation/Tender Master
-*Retrieves negotiation/tender details with bids.*
+## 11. PR Status Lookup
+*Retrieves PR status meanings from FND lookup.*
 
 ```sql
-NEGOTIATION_MASTER AS (
-    SELECT /*+ qb_name(NEG_MST) MATERIALIZE */
-           PAHA.AUCTION_HEADER_ID
-          ,PAHA.DOCUMENT_NUMBER AS TENDER_NUMBER
-          ,PAHA.AUCTION_TITLE AS TENDER_TITLE
-          ,PAHA.AUCTION_STATUS
-          ,PON_AUCTION_PKG.GET_AUCTION_STATUS_DISPLAY(PAHA.AUCTION_HEADER_ID, 'Y') AS TENDER_STATUS
-          ,PAHA.CURRENCY_CODE
-          ,PAHA.OPEN_BIDDING_DATE
-          ,PAHA.CLOSE_BIDDING_DATE
-          ,PAHA.AWARD_DATE
-          ,PAHA.NUMBER_OF_BIDS
-          ,PBR.REQUISITION_NUMBER
-          ,PNST.STYLE_NAME AS TENDER_STYLE
-    FROM   PON_AUCTION_HEADERS_ALL PAHA
-          ,PON_BACKING_REQUISITIONS PBR
-          ,PON_NEGOTIATION_STYLES_TL PNST
-    WHERE  PAHA.AUCTION_HEADER_ID = PBR.AUCTION_HEADER_ID(+)
-      AND  PAHA.STYLE_ID = PNST.STYLE_ID(+)
+PR_STATUS_LOOKUP AS (
+    SELECT /*+ qb_name(PR_STAT) MATERIALIZE */
+           FLVT.LOOKUP_CODE
+          ,FLVT.MEANING AS PR_STATUS
+    FROM   FND_LOOKUP_VALUES_TL FLVT
+    WHERE  FLVT.LOOKUP_TYPE = 'POR_DOCUMENT_STATUS'
+      AND  FLVT.VIEW_APPLICATION_ID = 0
+      AND  FLVT.SET_ID = 0
+      AND  FLVT.LANGUAGE = USERENV('LANG')
 )
 ```
 
 ---
 
-## 11. Bid Details Master
-*Retrieves supplier bids with scoring.*
+## 12. Supplier Master (Header)
+*Retrieves supplier header information filtered by creation date.*
 
 ```sql
-BID_DETAILS AS (
-    SELECT /*+ qb_name(BID_DTL) MATERIALIZE */
-           PBH.AUCTION_HEADER_ID
-          ,PBH.BID_NUMBER
-          ,PBH.TRADING_PARTNER_ID
-          ,PBH.VENDOR_ID
-          ,PSV.VENDOR_NAME AS BIDDER_NAME
-          ,PBH.BID_STATUS
-          ,PBH.AWARD_STATUS
-          ,PBH.BUYER_BID_TOTAL AS BID_AMOUNT
-          ,PBH.TOTAL_AWARD_AMOUNT AS AWARDED_AMOUNT
-          ,PBH.SHORTLIST_FLAG
-    FROM   PON_BID_HEADERS PBH
-          ,POZ_SUPPLIERS_V PSV
-    WHERE  PBH.TRADING_PARTNER_ID = PSV.PARTY_ID(+)
-      AND  PBH.VENDOR_ID = PSV.VENDOR_ID(+)
+SUPPLIER_MASTER AS (
+    SELECT /*+ qb_name(SUPP_MST) MATERIALIZE PARALLEL(2) */
+           PSV.VENDOR_ID
+          ,PSV.SEGMENT1 AS SUPPLIER_NUMBER
+          ,PSV.VENDOR_NAME AS SUPPLIER_NAME
+          ,PSV.VENDOR_TYPE_LOOKUP_CODE AS VENDOR_TYPE_CODE
+          ,PSV.CREATION_DATE AS SUPPLIER_CREATION_DATE
+          ,PSV.PARTY_ID
+    FROM   POZ_SUPPLIERS_V PSV
+    WHERE  TRUNC(PSV.CREATION_DATE) BETWEEN TRUNC(:P_SUPPLIER_CREATION_DATE_FROM)
+                                       AND TRUNC(:P_SUPPLIER_CREATION_DATE_TO)
 )
 ```
 
 ---
 
-## 12. Work Confirmation Master
-*Retrieves work confirmation details.*
+## 13. Supplier Sites Master
+*Retrieves supplier site information.*
 
 ```sql
-WORK_CONFIRMATION_MASTER AS (
-    SELECT /*+ qb_name(WC_MST) MATERIALIZE */
-           PWH.WORK_CONFIRMATION_ID
-          ,PWH.WORK_CONFIRMATION_NUM
-          ,PWH.PO_HEADER_ID
-          ,PWH.STATUS AS WC_STATUS
-          ,PWH.COMMENTS AS WC_DESCRIPTION
-          ,PWH.CREATION_DATE AS WC_DATE
-          ,TO_CHAR(PWH.CREATION_DATE, 'YYYY') AS WC_YEAR
-          ,PWL.WORK_CONFIRMATION_LINE_ID
-          ,PWL.LINE_LOCATION_ID
-          ,PWL.AMOUNT AS WC_AMOUNT
-    FROM   PO_WC_HEADERS PWH
-          ,PO_WC_LINES PWL
-    WHERE  PWH.WORK_CONFIRMATION_ID = PWL.WORK_CONFIRMATION_ID
-      AND  PWH.PO_HEADER_ID IS NOT NULL
+SUPPLIER_SITES AS (
+    SELECT /*+ qb_name(SUPP_SITES) MATERIALIZE */
+           PSSV.VENDOR_ID
+          ,PSSV.VENDOR_SITE_ID
+          ,PSSV.PARTY_SITE_NAME AS SITE_NAME
+          ,PSSV.PARTY_SITE_ID
+          ,PSSV.TERMS_ID
+          ,PSSV.PRC_BU_ID
+    FROM   POZ_SUPPLIER_SITES_V PSSV
 )
 ```
 
 ---
 
-## 13. Item Master
-*Retrieves item details with category.*
+## 14. Supplier Address Master
+*Retrieves supplier address details from separate address view.*
 
 ```sql
-ITEM_MASTER AS (
-    SELECT /*+ qb_name(ITEM_MST) MATERIALIZE */
-           ESIV.INVENTORY_ITEM_ID
-          ,ESIV.ORGANIZATION_ID
-          ,ESIV.ITEM_NUMBER
-          ,ESIV.DESCRIPTION AS ITEM_DESCRIPTION
-          ,IUOMV.UNIT_OF_MEASURE AS PRIMARY_UOM
-          ,ECV.CATEGORY_NAME AS ITEM_CATEGORY
-    FROM   EGP_SYSTEM_ITEMS_VL ESIV
-          ,INV_UNITS_OF_MEASURE_VL IUOMV
-          ,EGP_ITEM_CATEGORIES EIC
-          ,EGP_CATEGORIES_VL ECV
-    WHERE  ESIV.PRIMARY_UOM_CODE = IUOMV.UOM_CODE(+)
-      AND  ESIV.INVENTORY_ITEM_ID = EIC.INVENTORY_ITEM_ID(+)
-      AND  ESIV.ORGANIZATION_ID = EIC.ORGANIZATION_ID(+)
-      AND  EIC.CATEGORY_ID = ECV.CATEGORY_ID(+)
+SUPPLIER_ADDRESS AS (
+    SELECT /*+ qb_name(SUPP_ADDR) MATERIALIZE */
+           PSAV.VENDOR_ID
+          ,PSAV.PARTY_SITE_ID
+          ,PSAV.ADDRESS1 AS ADDRESS_LINE1
+          ,PSAV.ADDRESS2 AS ADDRESS_LINE2
+          ,PSAV.CITY
+          ,PSAV.PHONE_NUMBER
+    FROM   POZ_SUPPLIER_ADDRESS_V PSAV
+)
+```
+
+---
+
+## 15. Vendor Type Lookup
+*Retrieves vendor type meanings from FND lookup.*
+
+```sql
+VENDOR_TYPE_LOOKUP AS (
+    SELECT /*+ qb_name(VEND_TYPE) MATERIALIZE */
+           FLVT.LOOKUP_CODE
+          ,FLVT.MEANING AS VENDOR_TYPE
+    FROM   FND_LOOKUP_VALUES_TL FLVT
+    WHERE  FLVT.LOOKUP_TYPE = 'ORA_POZ_VENDOR_TYPE'
+      AND  FLVT.VIEW_APPLICATION_ID = 0
+      AND  FLVT.SET_ID = 0
+      AND  FLVT.LANGUAGE = USERENV('LANG')
+)
+```
+
+---
+
+## 16. Vendor Status Lookup
+*Retrieves vendor status from HZ_PARTIES table.*
+
+```sql
+VENDOR_STATUS_LOOKUP AS (
+    SELECT /*+ qb_name(VEND_STAT) MATERIALIZE */
+           HP.PARTY_ID
+          ,HP.STATUS AS STATUS_CODE
+          ,DECODE(HP.STATUS, 'A', 'Active', 'I', 'Inactive', 'Inactive') AS VENDOR_STATUS
+    FROM   HZ_PARTIES HP
+)
+```
+
+---
+
+## 17. Tax Profile Master
+*Retrieves tax registration and classification from party tax profile.*
+
+```sql
+TAX_PROFILE AS (
+    SELECT /*+ qb_name(TAX_PROF) MATERIALIZE */
+           ZPTP.PARTY_ID
+          ,ZPTP.REP_REGISTRATION_NUMBER AS TAX_REGISTRATION_NUMBER
+          ,ZPTP.TAX_CLASSIFICATION_CODE
+    FROM   ZX_PARTY_TAX_PROFILE ZPTP
+)
+```
+
+---
+
+## 18. Business Classifications Master
+*Retrieves trade license number from business classifications.*
+
+```sql
+BUSINESS_CLASSIFICATIONS AS (
+    SELECT /*+ qb_name(BUS_CLASS) MATERIALIZE */
+           PBCV.VENDOR_ID
+          ,MAX(CASE 
+                  WHEN UPPER(PBCV.DISPLAYED_FIELD) LIKE '%TRADE%LICENSE%' 
+                     OR UPPER(PBCV.DISPLAYED_FIELD) LIKE '%LICENSE%'
+                     OR UPPER(PBCV.CERTIFYING_AGENCY) LIKE '%TRADE%LICENSE%'
+                     OR UPPER(PBCV.CERTIFYING_AGENCY) LIKE '%LICENSE%'
+                  THEN PBCV.CERTIFICATE_NUMBER
+                  ELSE NULL
+              END) AS TRADE_LICENSE_NUMBER
+    FROM   POZ_BUSINESS_CLASSIFICATIONS_V PBCV
+    WHERE  PBCV.STATUS = 'A'
+    GROUP BY PBCV.VENDOR_ID
+)
+```
+
+---
+
+## 19. Supplier Bank Account Master
+*Retrieves primary supplier bank account with bank details. Requires complex join through IBY tables.*
+
+```sql
+BANK_MASTER AS (
+    SELECT /*+ qb_name(BANK_MST) MATERIALIZE */
+           IAO.ACCOUNT_OWNER_PARTY_ID
+          ,IEBA.BANK_ACCOUNT_NUM AS BANK_ACCOUNT_NUMBER
+          ,IEBA.BANK_ACCOUNT_NAME
+          ,CE.BANK_NAME
+          ,CE.BANK_NUMBER
+          ,IEPA.SUPPLIER_SITE_ID
+    FROM   IBY_EXT_BANK_ACCOUNTS IEBA
+          ,IBY_ACCOUNT_OWNERS IAO
+          ,IBY_EXTERNAL_PAYEES_ALL IEPA
+          ,IBY_PMT_INSTR_USES_ALL IPIUA
+          ,CE_BANKS_V CE
+    WHERE  IEBA.EXT_BANK_ACCOUNT_ID = IAO.EXT_BANK_ACCOUNT_ID
+      AND  IAO.PRIMARY_FLAG = 'Y'
+      AND  IAO.ACCOUNT_OWNER_PARTY_ID = IEPA.PAYEE_PARTY_ID
+      AND  IAO.EXT_BANK_ACCOUNT_ID = IPIUA.INSTRUMENT_ID
+      AND  IEPA.EXT_PAYEE_ID = IPIUA.EXT_PMT_PARTY_ID
+      AND  IEBA.BANK_ID = CE.BANK_PARTY_ID(+)
+)
+```
+
+---
+
+## 20. Payment Terms Master (Translated)
+*Retrieves payment terms from translated table for multilingual support.*
+
+```sql
+PAYMENT_TERMS_MASTER AS (
+    SELECT /*+ qb_name(PAY_TERMS) MATERIALIZE */
+           APT.TERM_ID
+          ,APT.NAME AS PAYMENT_TERM
+    FROM   AP_TERMS_TL APT
+    WHERE  APT.LANGUAGE = USERENV('LANG')
 )
 ```
