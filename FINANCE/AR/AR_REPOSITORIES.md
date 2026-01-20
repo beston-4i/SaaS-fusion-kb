@@ -227,6 +227,8 @@ TRX_UNION AS (
 ```
 
 **✅ CORRECT PATTERN 1: Cash Applications - Get Exchange Rate from Receipt**
+
+**Basic Pattern (Simple Cases):**
 ```sql
 -- Cash Applications: Exchange rate from AR_CASH_RECEIPTS_ALL
 -- CRITICAL: Include PAYMENT_SCHEDULE_ID join for accurate line-level matching
@@ -244,6 +246,34 @@ WHERE TD.CUSTOMER_TRX_ID = ARA.APPLIED_CUSTOMER_TRX_ID
   AND ARA.STATUS = 'APP'
   AND ARA.DISPLAY = 'Y'
 ```
+
+**✅ PRODUCTION-VALIDATED PATTERN (AR Aging Reports - Matches System Values):**
+```sql
+-- Enhanced currency conversion for AR Aging Reports
+-- Handles TRANS_TO_RECEIPT_RATE and conditional logic based on invoice exchange rate
+SELECT /*+ qb_name(TU_CASH) PARALLEL(4) */
+     TD.CUST_ACCOUNT_ID
+    ,CASE P.CURRENCY_TYPE
+        WHEN 'Entered Currency' THEN (-1 * ARA.AMOUNT_APPLIED)
+        ELSE  CASE 
+                WHEN TD.EXCH_RATE = 1 
+                THEN  (-1 * NVL(ACRA.EXCHANGE_RATE,1) * NVL(ARA.TRANS_TO_RECEIPT_RATE,1) * ARA.AMOUNT_APPLIED)
+                ELSE (-1 * COALESCE(ACRA.EXCHANGE_RATE,ARA.TRANS_TO_RECEIPT_RATE,1) * ARA.AMOUNT_APPLIED)
+              END
+     END AS AMOUNT
+FROM 
+     TRX_DETAILS TD
+    ,AR_RECEIVABLE_APPLICATIONS_ALL ARA
+    ,AR_CASH_RECEIPTS_ALL ACRA
+    ,PARAM P
+WHERE TD.CUSTOMER_TRX_ID = ARA.APPLIED_CUSTOMER_TRX_ID
+  AND TD.PAYMENT_SCHEDULE_ID = ARA.APPLIED_PAYMENT_SCHEDULE_ID  -- ✅ CRITICAL for aging
+  AND ARA.CASH_RECEIPT_ID = ACRA.CASH_RECEIPT_ID
+  AND ARA.APPLICATION_TYPE = 'CASH'
+  AND ARA.STATUS = 'APP'
+  AND ARA.DISPLAY = 'Y'
+```
+**Note:** Use the Production-Validated Pattern for AR Aging Reports (Section 21 and Section 27) to ensure exact match with Oracle Fusion system values.
 
 **✅ CORRECT PATTERN 2: CM Applications - Get Exchange Rate from CM Transaction**
 ```sql
@@ -1350,16 +1380,22 @@ TRX_UNION AS (
           ,TD.CUSTOMER_ID
           ,TD.ORG_ID
           ,TD.SET_OF_BOOKS_ID
-          -- Currency Conversion Logic (with sign reversal)
+          -- Currency Conversion Logic (Production-Validated - Matches System Values)
           ,CASE P.CURRENCY_TYPE
               WHEN 'Entered Currency' THEN (-1 * ARA.AMOUNT_APPLIED)
-              ELSE (-1 * (TD.EXCH_RATE * ARA.AMOUNT_APPLIED))
+              ELSE  CASE 
+                      WHEN TD.EXCH_RATE = 1 
+                      THEN  (-1 * NVL(ACRA.EXCHANGE_RATE,1) * NVL(ARA.TRANS_TO_RECEIPT_RATE,1) * ARA.AMOUNT_APPLIED)
+                      ELSE (-1 * COALESCE(ACRA.EXCHANGE_RATE,ARA.TRANS_TO_RECEIPT_RATE,1) * ARA.AMOUNT_APPLIED)
+                    END
            END AS AMOUNT
     FROM   TRX_DETAILS TD
           ,AR_RECEIVABLE_APPLICATIONS_ALL ARA
+          ,AR_CASH_RECEIPTS_ALL ACRA
           ,PARAM P
     WHERE  TD.CUSTOMER_TRX_ID = ARA.APPLIED_CUSTOMER_TRX_ID
       AND  TD.PAYMENT_SCHEDULE_ID = ARA.APPLIED_PAYMENT_SCHEDULE_ID
+      AND  ARA.CASH_RECEIPT_ID = ACRA.CASH_RECEIPT_ID
       AND  ARA.GL_DATE <= P.AS_OF_DATE
       AND  ARA.APPLICATION_TYPE = 'CASH'
       AND  ARA.DISPLAY = 'Y'
@@ -3394,10 +3430,14 @@ TRX_UNION AS (
         ,TD.ORG_ID
         ,TD.SET_OF_BOOKS_ID
         ,TD.TRANSACTION_TYPE
-        -- Currency Conversion Logic
+        -- Currency Conversion Logic (Production-Validated - Matches System Values)
         ,CASE P.CURRENCY_TYPE
             WHEN 'Entered Currency' THEN (-1 * ARA.AMOUNT_APPLIED)
-            ELSE (-1 * NVL(ACRA.EXCHANGE_RATE, 1) * ARA.AMOUNT_APPLIED)
+            ELSE  CASE 
+                    WHEN TD.EXCH_RATE = 1 
+                    THEN  (-1 * NVL(ACRA.EXCHANGE_RATE,1) * NVL(ARA.TRANS_TO_RECEIPT_RATE,1) * ARA.AMOUNT_APPLIED)
+                    ELSE (-1 * COALESCE(ACRA.EXCHANGE_RATE,ARA.TRANS_TO_RECEIPT_RATE,1) * ARA.AMOUNT_APPLIED)
+                  END
          END                                                AS AMOUNT
     FROM 
          TRX_DETAILS TD
