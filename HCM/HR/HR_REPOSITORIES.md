@@ -2,8 +2,8 @@
 
 **Purpose:** Standardized CTEs for extracting Core HR data  
 **Critical Rule:** All `_F` tables MUST have date filters  
-**Last Updated:** 07-Jan-2026  
-**Version:** 2.0 (Merged with update file)
+**Last Updated:** 01-Feb-2026  
+**Version:** 2.1 (Added LEAVING_REASON pattern and PERSON_TYPE_ID clarifications)
 
 ---
 
@@ -457,9 +457,42 @@ Before using any CTE from this repository:
 
 ---
 
+## ⚠️ Critical Column Locations (UPDATED)
+
+### PERSON_TYPE_ID
+- **WRONG:** `PAPF.PERSON_TYPE_ID` (column doesn't exist in PER_ALL_PEOPLE_F)
+- **CORRECT:** `PAAF.PERSON_TYPE_ID` (from PER_ALL_ASSIGNMENTS_F)
+- **Join Path:** PAPF → PAAF → PER_PERSON_TYPES_TL
+
+### LEAVING_REASON
+- **WRONG:** `PPOS.LEAVING_REASON` (column doesn't exist in PER_PERIODS_OF_SERVICE)
+- **CORRECT:** Via subquery from `PER_ACTION_REASONS_TL`
+- **Join Path:** PPOS → PAAF → PER_ACTION_REASONS_B → PER_ACTION_REASONS_TL
+- **Pattern:** See HR_MASTER.md Section 10.2 for complete implementation
+
+### EMPLOYEE_CATEGORY (Worker Category)
+- **WRONG:** `PAAF.ASSIGNMENT_CATEGORY` (for worker category)
+- **CORRECT:** `PAAF.EMPLOYEE_CATEGORY` (for worker category)
+- **Difference:** Both columns exist but serve different purposes
+- **Lookup:** Decode with `HR_LOOKUPS` WHERE `LOOKUP_TYPE = 'EMPLOYEE_CATG'`
+- **Pattern:** See HR_MASTER.md Section 11.1 for complete worker category pattern
+
+### PROBATION & NOTICE PERIOD (CORRECTED)
+- **CORRECT:** Standard columns in `PER_ALL_ASSIGNMENTS_F`
+  - `DATE_PROBATION_END` - Probation end date
+  - `PROBATION_PERIOD` - Probation period value
+  - `PROBATION_UNIT` - Probation period unit
+  - `NOTICE_PERIOD` - Notice period value
+  - `NOTICE_PERIOD_UOM` - Notice period unit of measure
+- **WRONG:** Assuming these are DFF attributes only
+- **Note:** These are standard columns, NOT DFF attributes
+- **Pattern:** Direct column access: `PAAF.DATE_PROBATION_END`, `PAAF.NOTICE_PERIOD`
+
+---
+
 **END OF HR_REPOSITORIES.md**
 
 **Status:** Merged and Complete  
-**Last Merged:** 07-Jan-2026  
+**Last Updated:** 01-Feb-2026  
 **Source Files:** HR_REPOSITORIES.md + HR_REPOSITORIES_UPDATE_02-01-26.md  
-**Version:** 2.0
+**Version:** 2.3

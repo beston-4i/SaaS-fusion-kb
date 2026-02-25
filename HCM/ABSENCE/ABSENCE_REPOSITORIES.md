@@ -3,8 +3,8 @@
 **Module:** HCM Absence Management  
 **Purpose:** Ready-to-use CTE components for absence/leave queries  
 **Tag:** `#HCM #ABSENCE #REPOSITORIES #CTEs`  
-**Last Updated:** 07-Jan-2026  
-**Version:** 2.0 (Merged with update file)
+**Last Updated:** 14-Jan-2026  
+**Version:** 3.0 (Added ANC_PER_ACRL_ENTRY_DTLS CTEs)
 
 ---
 
@@ -40,6 +40,8 @@
 | **PLAN_ENROLLMENT** | Absence plan enrollment | ANC_PER_ENROLLMENTS | Plan-based queries |
 | **CARRYOVER_DETAILS** | Carryover and expiry | ANC_PER_CARRYOVER | Balance with carryover |
 | **ENCASHMENT_DETAILS** | Leave encashment | ANC_PER_ENCASHMENTS | Encashment tracking |
+| **PLAN_ENROLLMENT_ACTIVE** | Active plan enrollments with dates | ANC_PER_PLAN_ENROLLMENT, ANC_ABSENCE_PLANS_VL | Enrollment-based reports |
+| **ACCRUAL_ENTRY_DETAILS** | Transaction-level balance breakdown | ANC_PER_ACRL_ENTRY_DTLS | **Adjustment reports, balance components** |
 
 ---
 
@@ -961,6 +963,212 @@ Before using any CTE from this repository:
 
 ---
 
+## 43. PLAN_ENROLLMENT_ACTIVE CTE **[NEW - 14-Jan-2026]**
+
+**Purpose:** Active absence plan enrollments with effective date filtering  
+**Source Table:** ANC_PER_PLAN_ENROLLMENT, ANC_ABSENCE_PLANS_VL  
+**Usage:** All queries requiring plan enrollment context with active status
+
+```sql
+WITH PLAN_ENROLLMENT_ACTIVE AS (
+    /*+ qb_name(PLAN_ENROLLMENT_ACTIVE) MATERIALIZE */
+    SELECT
+        APPE.PER_PLAN_ENRT_ID,
+        APPE.PERSON_ID,
+        APPE.PLAN_ID,
+        APPE.ENRT_ST_DT,
+        APPE.ENRT_END_DT,
+        APPE.STATUS AS ENROLLMENT_STATUS,
+        AAPV.NAME AS PLAN_NAME,
+        AAPV.PLAN_PERIOD_TYPE,
+        AAPV.PLAN_UOM,
+        AAPV.PLAN_STATUS
+    FROM
+        PARAMETERS P,
+        ANC_PER_PLAN_ENROLLMENT APPE,
+        ANC_ABSENCE_PLANS_VL AAPV
+    WHERE
+        APPE.PLAN_ID = AAPV.ABSENCE_PLAN_ID
+        AND APPE.STATUS = 'A'
+        AND AAPV.PLAN_STATUS = 'A'
+        AND P.EFFECTIVE_DATE BETWEEN APPE.ENRT_ST_DT AND APPE.ENRT_END_DT
+        AND P.EFFECTIVE_DATE BETWEEN TRUNC(AAPV.EFFECTIVE_START_DATE) AND TRUNC(AAPV.EFFECTIVE_END_DATE)
+        -- Optional plan filter
+        AND (UPPER(AAPV.NAME) = P.ABSENCE_PLAN OR P.ABSENCE_PLAN = 'ALL')
+)
+```
+
+**Columns Provided:**
+- `PER_PLAN_ENRT_ID` - Enrollment ID (PK for linking to detail transactions)
+- `PERSON_ID` - Employee
+- `PLAN_ID` - Absence plan
+- `ENRT_ST_DT` / `ENRT_END_DT` - Enrollment period
+- `ENROLLMENT_STATUS` - Enrollment status ('A' = Active)
+- `PLAN_NAME` - Plan name for display
+- `PLAN_PERIOD_TYPE` - Calendar ('C') or Anniversary
+- `PLAN_UOM` - Unit of measure (Days/Hours)
+- `PLAN_STATUS` - Plan status ('A' = Active)
+
+**Join To:**
+```sql
+FROM EMP_BASE EB,
+     PLAN_ENROLLMENT_ACTIVE PEA
+WHERE EB.PERSON_ID = PEA.PERSON_ID
+```
+
+**Key Features:**
+- Filters for active enrollments only (`STATUS = 'A'`)
+- Filters for active plans only (`PLAN_STATUS = 'A'`)
+- Date-effective filtering on enrollment dates
+- Date-effective filtering on plan definition dates
+- Optional case-insensitive plan name filter
+
+**Use Cases:**
+- Accrual balance queries requiring enrollment context
+- Enrollment reports
+- Plan-specific absence reports
+- Reports requiring PLAN_PERIOD_TYPE for calculations
+
+---
+
+## 44. ACCRUAL_ENTRY_DETAILS CTE **[NEW - 14-Jan-2026]**
+
+**Purpose:** Transaction-level accrual details with balance component breakdown  
+**Source Table:** ANC_PER_ACRL_ENTRY_DTLS  
+**Usage:** Reports requiring detailed balance components (carryover, adjustments, encashments)
+
+```sql
+WITH ACCRUAL_ENTRY_DETAILS AS (
+    /*+ qb_name(ACCRUAL_ENTRY_DETAILS) MATERIALIZE */
+    SELECT
+        PEA.PERSON_ID,
+        PEA.PLAN_NAME,
+        PEA.PLAN_ID,
+        -- Component 1: Previous Year Carryover
+        NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR' 
+                       OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+                     THEN APACD.VALUE ELSE 0 END), 0) AS PY_CARRYOVER,
+        -- Component 2: Current Year Accrual
+        NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CY_ACCRUAL,
+        -- Component 3: Taken Leave (up to effective date)
+        ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
+                         THEN APACD.VALUE ELSE 0 END), 0)) AS TAKEN_LEAVE,
+        -- Component 4: Booked Leave (future approved)
+        ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE > P.EFFECTIVE_DATE
+                         THEN APACD.VALUE ELSE 0 END), 0)) AS BOOKED_LEAVE,
+        -- Component 5: Adjustments (exclude carryover)
+        NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+                     AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS ADJUSTMENT,
+        -- Component 6: Encashment
+        NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS ENCASHMENT,
+        -- Component 7: Carryover Expiry
+        NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY,
+        -- Total Balance (calculated)
+        NVL(SUM(APACD.VALUE), 0) AS TOTAL_BALANCE
+    FROM
+        PARAMETERS P,
+        PLAN_ENROLLMENT_ACTIVE PEA,
+        ANC_PER_ACRL_ENTRY_DTLS APACD
+    WHERE
+        PEA.PER_PLAN_ENRT_ID = APACD.PER_PLAN_ENRT_ID
+        AND PEA.PLAN_ID = APACD.PL_ID
+        -- Plan period filter (calendar vs anniversary)
+        AND APACD.PROCD_DATE BETWEEN 
+            CASE WHEN PEA.PLAN_PERIOD_TYPE = 'C' 
+                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE,'YYYY'),'DDMMYYYY')
+                 ELSE -- Anniversary logic: Use hire date for period start
+                      -- Note: Requires join to PPOS in outer query for full accuracy
+                      TRUNC(P.EFFECTIVE_DATE, 'YYYY')
+            END
+            AND P.EFFECTIVE_DATE
+    GROUP BY
+        PEA.PERSON_ID,
+        PEA.PLAN_NAME,
+        PEA.PLAN_ID
+)
+```
+
+**Columns Provided:**
+- `PY_CARRYOVER` - Previous year balance carried forward
+- `CY_ACCRUAL` - Current year accrued leave
+- `TAKEN_LEAVE` - Leave taken to date (positive value)
+- `BOOKED_LEAVE` - Future approved leave (positive value)
+- `ADJUSTMENT` - Manual adjustments (positive or negative)
+- `ENCASHMENT` - Leave encashed/cashed out
+- `CARRYOVER_EXPIRY` - Expired carryover
+- `TOTAL_BALANCE` - Net balance (all components summed)
+
+**Join To:**
+```sql
+FROM EMP_BASE EB,
+     ACCRUAL_ENTRY_DETAILS AED
+WHERE EB.PERSON_ID = AED.PERSON_ID
+```
+
+**Balance Formula:**
+```
+TOTAL_BALANCE = PY_CARRYOVER + CY_ACCRUAL + ADJUSTMENT - TAKEN_LEAVE - ENCASHMENT - CARRYOVER_EXPIRY
+```
+
+**Key Features:**
+- Uses MATERIALIZE hint for optimization
+- Aggregates transaction details into summary components
+- Filters by plan period type (Calendar vs Anniversary)
+- Handles taken leave vs booked leave separately
+- Excludes carryover from general adjustments
+- All components use NVL() to prevent NULL arithmetic
+
+**Performance:**
+- Requires PLAN_ENROLLMENT_ACTIVE CTE as prerequisite
+- Aggregates transaction-level data to person-plan level
+- Uses CASE statements for component breakdown
+- Filtered by effective date and plan period
+
+**Use Cases:**
+- Leave adjustment reports
+- Detailed balance breakdown reports
+- Audit reports showing all balance components
+- Carryover and encashment tracking reports
+- Regulatory compliance reports requiring component detail
+
+**Dependencies:**
+- Requires PARAMETERS CTE
+- Requires PLAN_ENROLLMENT_ACTIVE CTE (or similar enrollment CTE)
+
+**Example Usage:**
+```sql
+WITH PARAMETERS AS (...),
+     EMP_BASE AS (...),
+     PLAN_ENROLLMENT_ACTIVE AS (...),
+     ACCRUAL_ENTRY_DETAILS AS (...)
+SELECT
+    EB.PERSON_NUMBER,
+    EB.PERSON_NAME,
+    AED.PLAN_NAME,
+    ROUND(AED.PY_CARRYOVER, 2) AS "Previous Year Carryover",
+    ROUND(AED.CY_ACCRUAL, 2) AS "Current Year Accrual",
+    ROUND(AED.ADJUSTMENT, 2) AS "Adjustments",
+    ROUND(AED.TAKEN_LEAVE, 2) AS "Leave Taken",
+    ROUND(AED.BOOKED_LEAVE, 2) AS "Booked Leave",
+    ROUND(AED.ENCASHMENT, 2) AS "Encashment",
+    ROUND(AED.CARRYOVER_EXPIRY, 2) AS "Carryover Expired",
+    ROUND(AED.TOTAL_BALANCE, 2) AS "Total Balance"
+FROM
+    EMP_BASE EB,
+    ACCRUAL_ENTRY_DETAILS AED
+WHERE
+    EB.PERSON_ID = AED.PERSON_ID
+ORDER BY
+    EB.PERSON_NUMBER,
+    AED.PLAN_NAME
+```
+
+---
+
 ## 📝 Notes
 
 1. **DO NOT modify these CTEs** without understanding the constraints from ABSENCE_MASTER.md
@@ -973,7 +1181,7 @@ Before using any CTE from this repository:
 
 **END OF ABSENCE_REPOSITORIES.md**
 
-**Status:** Merged and Complete  
-**Last Merged:** 07-Jan-2026  
-**Source Files:** ABSENCE_REPOSITORIES.md + ABSENCE_REPOSITORIES_UPDATE_31-12-25.md  
-**Version:** 2.0
+**Status:** Updated with ANC_PER_ACRL_ENTRY_DTLS CTEs  
+**Last Updated:** 14-Jan-2026  
+**Source Files:** ABSENCE_REPOSITORIES.md + ABSENCE_REPOSITORIES_UPDATE_31-12-25.md + Production SQL Analysis (14-Jan-2026)  
+**Version:** 3.0

@@ -1,9 +1,10 @@
 # Time & Labor Master Instructions
 
-**Module:** Time & Labor (HWM)  
-**Tag:** `#HCM #TL #HWM #Timesheet`  
+**Module:** Time & Labor (HWM + Custom ZMM)  
+**Tag:** `#HCM #TL #HWM #Timesheet #Production`  
 **Status:** Production-Ready  
-**Last Updated:** 18-Dec-2025
+**Last Updated:** 29-Jan-2026  
+**Version:** 2.0 - Enhanced with Production Schedule/Shift Patterns
 
 ---
 
@@ -482,9 +483,10 @@ CASE WHEN TMH.STATUS = 'Approved' THEN TMH.LAST_UPDATE_DATE END APPROVAL_DATE
 
 ---
 
-**Last Updated:** 13-Jan-2026  
+**Last Updated:** 29-Jan-2026  
 **Status:** Production-Ready  
-**Source:** Employee Timesheet Report (980 lines analyzed) + OTL Production Queries (10 files)
+**Source:** Employee Timesheet Report (980 lines) + OTL Production Queries (10 files) + Missing Timecard & Overtime Reports (3,500+ lines analyzed)  
+**Version:** 2.0 - Enhanced with Production Schedule/Shift Patterns
 
 ---
 
@@ -715,6 +717,401 @@ NVL(
 - `TM_BLDG_BLK_ID` - TM_REC_ID or TM_REC_GRP_ID
 - `TM_BLDG_BLK_VERSION` - Version
 - `STATUS_VALUE` - Status (e.g., 'Approved', 'Rejected')
+
+---
+
+## 9. 🏭 Production Patterns (Custom Schedule/Shift Reports)
+
+**Source:** 5 Production Reports (3,500+ lines analyzed - 29-Jan-2026)  
+**Status:** Production-Proven Patterns
+
+### 9.1 🚨 CRITICAL: Custom Schedule Tables (ZMM Prefix)
+
+**⚠️ Your environment uses CUSTOM schedule/shift tables. MUST be used for all schedule/shift-based reports:**
+
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| **ZMM_SR_SCHEDULES_VL** | Schedule Master | `SCHEDULE_ID`, `SCHEDULE_NAME` |
+| **ZMM_SR_SCHEDULE_DTLS** | Shift Date/Time Details | `SCHEDULE_ID`, `SHIFT_ID`, `START_DATE_TIME`, `END_DATE_TIME` |
+| **ZMM_SR_SHIFTS_VL** | Shift Definitions | `SHIFT_ID`, `SHIFT_NAME`, `DURATION_MS_NUM`, `START_TIME_MS_NUM`, `DELETED_FLAG` |
+| ⭐ **ZMM_SR_AVAILABLE_DATES** | Working Dates Calendar | `SCHEDULE_ID`, `CALENDAR_DATE` |
+| **PER_SCHEDULE_ASSIGNMENTS** | Employee-Schedule Link | `RESOURCE_ID`, `SCHEDULE_ID`, `RESOURCE_TYPE`, `PRIMARY_FLAG`, `START_DATE`, `END_DATE` |
+
+### 9.2 Dual Schedule Assignment Pattern (CRITICAL)
+
+**⚠️ CRITICAL:** Schedules assigned at TWO levels - YOU MUST USE UNION:
+
+1. **Legal Entity Level** (`RESOURCE_TYPE = 'LEGALEMP'`)
+2. **Assignment Level** (`RESOURCE_TYPE = 'ASSIGN'`) - **OVERRIDES Legal Entity**
+
+**Pattern:**
+```sql
+-- ALWAYS use this UNION pattern for schedule assignments
+PERSON_WITH_SCHEDULE AS (
+    -- Part 1: Legal Entity Level Schedules
+    SELECT
+        PAPF.PERSON_ID,
+        PAAF.ASSIGNMENT_ID,
+        PSA.SCHEDULE_ID,
+        ZSSV.SCHEDULE_NAME,
+        CASE WHEN TRUNC(PAPF.START_DATE) > TRUNC(PSA.START_DATE) 
+             THEN TRUNC(PAPF.START_DATE) 
+             ELSE TRUNC(PSA.START_DATE) 
+        END START_DATE_LE,
+        TRUNC(PSA.END_DATE) END_DATE_LE,
+        NULL START_DATE,
+        NULL END_DATE
+    FROM
+        PER_ALL_PEOPLE_F PAPF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_SCHEDULE_ASSIGNMENTS PSA,
+        ZMM_SR_SCHEDULES_VL ZSSV
+    WHERE PAAF.LEGAL_ENTITY_ID = PSA.RESOURCE_ID      -- LE link
+      AND PSA.SCHEDULE_ID = ZSSV.SCHEDULE_ID
+      AND PSA.RESOURCE_TYPE = 'LEGALEMP'
+      AND PSA.PRIMARY_FLAG = 'Y'
+      -- Exclude if assignment-level schedule exists
+      AND NOT EXISTS (
+          SELECT 1
+          FROM PER_SCHEDULE_ASSIGNMENTS PSA2,
+               ZMM_SR_AVAILABLE_DATES Z
+          WHERE PAAF.ASSIGNMENT_ID = PSA2.RESOURCE_ID
+            AND PSA2.RESOURCE_TYPE = 'ASSIGN'
+            AND PSA2.PRIMARY_FLAG = 'Y'
+            AND PSA2.SCHEDULE_ID = Z.SCHEDULE_ID
+            AND TRUNC(Z.CALENDAR_DATE) = TRUNC(:P_DATE)
+            AND TRUNC(Z.CALENDAR_DATE) BETWEEN TRUNC(PSA2.START_DATE) AND TRUNC(PSA2.END_DATE)
+      )
+
+    UNION ALL
+
+    -- Part 2: Assignment Level Schedules (overrides LE)
+    SELECT
+        PAPF.PERSON_ID,
+        PAAF.ASSIGNMENT_ID,
+        PSA.SCHEDULE_ID,
+        ZSSV.SCHEDULE_NAME,
+        NULL START_DATE_LE,
+        NULL END_DATE_LE,
+        CASE WHEN TRUNC(PAPF.START_DATE) > TRUNC(PSA.START_DATE) 
+             THEN TRUNC(PAPF.START_DATE) 
+             ELSE TRUNC(PSA.START_DATE) 
+        END START_DATE,
+        TRUNC(PSA.END_DATE) END_DATE
+    FROM
+        PER_ALL_PEOPLE_F PAPF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_SCHEDULE_ASSIGNMENTS PSA,
+        ZMM_SR_SCHEDULES_VL ZSSV
+    WHERE PAAF.ASSIGNMENT_ID = PSA.RESOURCE_ID        -- Assignment link
+      AND PSA.SCHEDULE_ID = ZSSV.SCHEDULE_ID
+      AND PSA.RESOURCE_TYPE = 'ASSIGN'
+      AND PSA.PRIMARY_FLAG = 'Y'
+)
+```
+
+### 9.3 HWM_TM_REC 3-Level Version Control (PRODUCTION)
+
+**⚠️ CRITICAL:** HWM_TM_REC requires 3-level version filtering (not just LATEST_VERSION):
+
+```sql
+TIME_RECORDS AS (
+    SELECT
+        /*+ index(HTR, HWM_TM_REC_U1) */
+        /*+ index(HTRGU, HWM_TM_REC_GRP_USAGES_U1) */
+        /*+ index(DTRG, HWM_TM_REC_GRP_U1) */
+        HTR.RESOURCE_ID,          -- PERSON_ID
+        HTR.SUBRESOURCE_ID,       -- ASSIGNMENT_ID
+        TRUNC(DTRG.START_TIME) DAY_START_TIME,
+        HTR.MEASURE               -- Hours
+    FROM 
+        HWM_TM_REC HTR,
+        HWM_TM_REC_GRP_USAGES HTRGU,
+        HWM_TM_REC_GRP DTRG,
+        HWM_TM_REC_GRP DTRG1,
+        HWM_TM_D_TM_UI_STATUS_V HTDTUSV
+    WHERE 
+        -- Table joins
+        HTRGU.TM_REC_GRP_ID = DTRG.TM_REC_GRP_ID
+      AND HTRGU.TM_REC_GRP_VERSION = DTRG.TM_REC_GRP_VERSION
+      AND DTRG.PARENT_TM_REC_GRP_ID = DTRG1.TM_REC_GRP_ID
+      AND DTRG.PARENT_TM_REC_GRP_VERSION = DTRG1.TM_REC_GRP_VERSION
+      AND HTR.TM_REC_ID = HTRGU.TM_REC_ID
+      AND HTR.TM_REC_VERSION = HTRGU.TM_REC_VERSION
+      AND DTRG1.TM_REC_GRP_ID = HTDTUSV.TM_BLDG_BLK_ID
+      
+      -- Standard filters (ALWAYS include)
+      AND UPPER(HTR.UNIT_OF_MEASURE) IN ('UN', 'HR')
+      AND DTRG1.GRP_TYPE_ID = 100              -- Daily group
+      AND HTR.RESOURCE_TYPE = 'PERSON'
+      AND HTR.DELETE_FLAG IS NULL
+      AND HTR.LAYER_CODE = 'TIME_RPTD'
+      AND TRUNC(HTR.STOP_TIME) IS NOT NULL
+      
+      -- Exclude midnight system entries
+      AND (EXTRACT(HOUR FROM HTR.START_TIME) <> 00
+        OR EXTRACT(MINUTE FROM HTR.START_TIME) <> 00)
+      
+      -- VERSION LEVEL 1: Latest version flag
+      AND NVL(HTR.LATEST_VERSION,'Y') = 'Y'
+      AND HTR.LATEST_VERSION = 'Y'
+      
+      -- VERSION LEVEL 2: Latest status version
+      AND (HTDTUSV.TM_BLDG_BLK_VERSION, HTDTUSV.STATUS_ID) = (
+          SELECT MAX(TM_BLDG_BLK_VERSION), MAX(STATUS_ID) 
+          FROM HWM_TM_D_TM_UI_STATUS_V 
+          WHERE TM_BLDG_BLK_ID = HTDTUSV.TM_BLDG_BLK_ID
+      )
+      
+      -- VERSION LEVEL 3: Latest creation date (handles edits)
+      AND HTR.CREATION_DATE = (
+          SELECT MAX(HTR1.CREATION_DATE)
+          FROM HWM_TM_REC HTR1,
+               HWM_TM_REC_GRP_USAGES HTRGU1,
+               HWM_TM_REC_GRP DTRG1,
+               HWM_TM_REC_GRP DTRG2
+          WHERE HTRGU1.TM_REC_GRP_ID = DTRG1.TM_REC_GRP_ID
+            AND HTRGU1.TM_REC_GRP_VERSION = DTRG1.TM_REC_GRP_VERSION
+            AND DTRG1.PARENT_TM_REC_GRP_ID = DTRG2.TM_REC_GRP_ID
+            AND DTRG1.PARENT_TM_REC_GRP_VERSION = DTRG2.TM_REC_GRP_VERSION
+            AND HTR1.TM_REC_ID = HTRGU1.TM_REC_ID
+            AND HTR1.TM_REC_VERSION = HTRGU1.TM_REC_VERSION
+            AND HTR1.LATEST_VERSION = 'Y'
+            AND HTR1.DELETE_FLAG IS NULL
+            AND HTR1.LAYER_CODE = 'TIME_RPTD'
+            AND DTRG1.TM_REC_GRP_ID = DTRG.TM_REC_GRP_ID
+            AND HTR1.RESOURCE_ID = HTR.RESOURCE_ID
+      )
+)
+```
+
+### 9.4 Missing Timecard Detection Pattern (NOT EXISTS)
+
+**Pattern:**
+```sql
+-- Identify employees missing timecards
+SELECT
+    EMP.PERSON_NUMBER,
+    WD.CALENDAR_DATE MISSING_DATE
+FROM
+    EMPLOYEES_WITH_SCHEDULE EMP,
+    WORKING_DATES WD
+WHERE EMP.SCHEDULE_ID = WD.SCHEDULE_ID
+  -- NO timecard exists
+  AND NOT EXISTS (
+      SELECT 1
+      FROM TIME_RECORDS TR
+      WHERE TR.RESOURCE_ID = EMP.PERSON_ID
+        AND TR.SUBRESOURCE_ID = EMP.ASSIGNMENT_ID
+        AND TR.DAY_START_TIME = WD.CALENDAR_DATE
+  )
+  -- Exclude public holidays
+  AND NOT EXISTS (
+      SELECT 1
+      FROM PUBLIC_HOLIDAYS PH
+      WHERE PH.PERSON_ID = EMP.PERSON_ID
+        AND WD.CALENDAR_DATE BETWEEN PH.START_DATE AND PH.END_DATE
+  )
+  -- Exclude absences
+  AND NOT EXISTS (
+      SELECT 1
+      FROM ABSENCES ABS
+      WHERE ABS.PERSON_ID = EMP.PERSON_ID
+        AND WD.CALENDAR_DATE BETWEEN ABS.START_DATE AND ABS.END_DATE
+  )
+```
+
+### 9.5 Working Dates Calendar Pattern
+
+```sql
+-- Get working dates from ZMM calendar
+WORKING_DATES AS (
+    SELECT 
+        SCHEDULE_ID,
+        TRUNC(CALENDAR_DATE) CALENDAR_DATE
+    FROM ZMM_SR_AVAILABLE_DATES
+    WHERE TRUNC(CALENDAR_DATE) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+)
+```
+
+### 9.6 Shift Details Pattern
+
+```sql
+-- Get shift details with time calculations
+SHIFT_DETAILS AS (
+    SELECT
+        ZSST.SCHEDULE_ID,
+        ZSST.SCHEDULE_NAME,
+        TRUNC(ZSSTD.START_DATE_TIME) CALENDAR_DATE,
+        ZSSTD.START_DATE_TIME,
+        ZSSTD.END_DATE_TIME,
+        ZSSV.SHIFT_NAME,
+        (ZSSV.DURATION_MS_NUM/3600000) SHIFT_HRS,     -- MS to hours
+        -- Day of week (1=Monday, 7=Sunday)
+        DECODE(TRIM(TO_CHAR(ZSSTD.START_DATE_TIME, 'DAY', 'NLS_DATE_LANGUAGE = AMERICAN')), 
+               'SUNDAY',7, 'MONDAY',1, 'TUESDAY',2, 'WEDNESDAY',3, 
+               'THURSDAY',4, 'FRIDAY',5, 'SATURDAY',6) SHIFT_DAY_NUM
+    FROM
+        ZMM_SR_SCHEDULES_TL      ZSST,
+        ZMM_SR_SCHEDULE_DTLS     ZSSTD,
+        ZMM_SR_SHIFTS_VL         ZSSV
+    WHERE ZSST.SCHEDULE_ID = ZSSTD.SCHEDULE_ID
+      AND ZSST.LANGUAGE = 'US'
+      AND ZSSTD.SHIFT_ID = ZSSV.SHIFT_ID  
+      AND ZSSV.DELETED_FLAG = 'N'
+      AND TRUNC(ZSSTD.START_DATE_TIME) BETWEEN :P_FROM_DATE AND :P_TO_DATE
+)
+```
+
+### 9.7 Public Holiday by Location Pattern
+
+```sql
+-- Get holidays based on employee location
+PUBLIC_HOLIDAY AS (
+    SELECT DISTINCT 
+        PAPF.PERSON_ID,
+        TRUNC(PCE.START_DATE_TIME) START_DATE,
+        TRUNC(PCE.END_DATE_TIME) END_DATE
+    FROM
+        PER_ALL_PEOPLE_F PAPF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_CALENDAR_EVENTS PCE,
+        PER_GEO_TREE_NODE_RF PNR,
+        HR_LOCATIONS HR
+    WHERE PCE.TREE_CODE = PNR.TREE_CODE
+      AND PCE.TREE_STRUCTURE_CODE = PNR.TREE_STRUCTURE_CODE
+      AND PAPF.PERSON_ID = PAAF.PERSON_ID
+      AND PAAF.LOCATION_ID = HR.LOCATION_ID
+      AND HR.COUNTRY = PNR.PK1_VALUE                  -- Geographic link
+      AND PCE.CATEGORY = 'PH'                         -- Public Holiday
+      AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+      AND TO_CHAR(PCE.START_DATE_TIME,'YYYY') = TO_CHAR(:P_FROM_DATE,'YYYY')
+)
+```
+
+### 9.8 'ALL' Parameter Bypass Pattern
+
+**Pattern for flexible filtering:**
+```sql
+WHERE 1=1
+    -- Employee filter
+    AND (PAPF.PERSON_ID IN (:P_PERSON_ID) OR 'ALL' IN (:P_PERSON_ID || 'ALL'))
+    
+    -- Department filter
+    AND (HDORG.NAME IN (:P_DEPARTMENT) OR 'ALL' IN (:P_DEPARTMENT || 'ALL'))
+    
+    -- Status filter
+    AND (HTDTUSV.STATUS_VALUE IN (:P_STATUS) OR 'ALL' IN (:P_STATUS || 'ALL'))
+```
+
+**Usage:** Pass 'ALL' to bypass filter, or specific value(s) to filter
+
+### 9.9 Time Calculations (Milliseconds Conversion)
+
+```sql
+-- Shift duration in hours
+(ZSSV.DURATION_MS_NUM / 3600000) SHIFT_HRS
+
+-- Shift start time hour component
+TRUNC(ROUND(ZSSV.START_TIME_MS_NUM/1000)/3600) SHIFT_HR
+
+-- Shift start time minute component
+TRUNC(MOD(ROUND(ZSSV.START_TIME_MS_NUM/1000), 3600)/60) SHIFT_MIN
+
+-- Day of week (1=Monday, 7=Sunday)
+DECODE(TRIM(TO_CHAR(date_column, 'DAY', 'NLS_DATE_LANGUAGE = AMERICAN')), 
+       'SUNDAY',7, 'MONDAY',1, 'TUESDAY',2, 'WEDNESDAY',3, 
+       'THURSDAY',4, 'FRIDAY',5, 'SATURDAY',6) DAY_NUM
+```
+
+### 9.10 Overtime Calculations
+
+**Normal OT (Weekday - capped at 2 hours/day):**
+```sql
+CASE 
+    WHEN (HOURS_WORKED - SHIFT_DURATION) > 2 THEN 2
+    WHEN (HOURS_WORKED - SHIFT_DURATION) <= 2 THEN HOURS_WORKED - SHIFT_DURATION
+    ELSE 0 
+END NORMAL_OT
+```
+
+**Holiday OT (Weekend/PH - capped at 8 hours/day):**
+```sql
+CASE 
+    WHEN HOURS_WORKED >= 8 THEN 8 
+    ELSE HOURS_WORKED 
+END HOLIDAY_OT
+```
+
+**Weekly OT Aggregation (45 hours regular, 35 hours Ramadan):**
+```sql
+CASE 
+    WHEN TOTAL_WEEKLY_HOURS <= 45 THEN 0
+    WHEN (TOTAL_WEEKLY_HOURS - 45) >= SUM_NORMAL_OT THEN SUM_NORMAL_OT
+    ELSE TOTAL_WEEKLY_HOURS - 45
+END WEEKLY_NORMAL_OT
+```
+
+### 9.11 Standard HWM_TM_REC Filters (ALWAYS Include)
+
+```sql
+WHERE 1=1
+    AND UPPER(HTR.UNIT_OF_MEASURE) IN ('UN', 'HR')
+    AND DTRG1.GRP_TYPE_ID = 100              -- Daily group
+    AND HTR.RESOURCE_TYPE = 'PERSON'
+    AND HTR.DELETE_FLAG IS NULL
+    AND HTR.LAYER_CODE = 'TIME_RPTD'
+    AND TRUNC(HTR.STOP_TIME) IS NOT NULL
+    AND NVL(HTR.LATEST_VERSION,'Y') = 'Y'
+    AND HTR.LATEST_VERSION = 'Y'
+    -- Exclude midnight system entries
+    AND (EXTRACT(HOUR FROM HTR.START_TIME) <> 00
+      OR EXTRACT(MINUTE FROM HTR.START_TIME) <> 00)
+```
+
+### 9.12 Performance: Index Hints (CRITICAL)
+
+**ALWAYS use index hints for HWM tables:**
+```sql
+SELECT
+    /*+ index(HTR, HWM_TM_REC_U1) */
+    /*+ index(HTRGU, HWM_TM_REC_GRP_USAGES_U1) */
+    /*+ index(DTRG, HWM_TM_REC_GRP_U1) */
+    /*+ index(PAAF, PER_ALL_ASSIGNMENTS_M_PK) */
+    /*+ index(PSA, PER_SCHEDULE_ASSIGNMENTS_U1) */
+    /*+ index(APAE, ANC_PER_ABS_ENTRIES_UK1) */
+    ...
+```
+
+**Impact:** 10x-100x performance improvement on large datasets
+
+### 9.13 Production Best Practices Summary
+
+**For ALL Time & Labor Reports:**
+
+✅ **ALWAYS use UNION** for schedule assignments (LEGALEMP + ASSIGN)  
+✅ **Apply 3-level version control** for HWM_TM_REC (not just flag)  
+✅ **Include index hints** for performance (6+ hints per query)  
+✅ **Use ZMM_SR_AVAILABLE_DATES** for working dates calendar  
+✅ **Exclude midnight entries** (system-generated, false positives)  
+✅ **Exclude holidays by location** (geography tree)  
+✅ **Exclude approved absences** (not withdrawn/denied)  
+✅ **Use 'ALL' parameter bypass** for flexible filtering  
+✅ **Apply standard HWM filters** (LAYER_CODE, DELETE_FLAG, etc.)  
+✅ **Handle midnight crossover** in time calculations  
+
+**Common Errors to Avoid:**
+
+| ❌ WRONG | ✅ CORRECT | Impact |
+|---------|-----------|--------|
+| Only LEGALEMP or ASSIGN | UNION both types | Missing employees |
+| Single version control | 3-level version control | Gets old/incorrect data |
+| No index hints | Include 6+ index hints | 10x slower |
+| Include midnight entries | Exclude 00:00:00 | False positives |
+| No holiday exclusion | Exclude by location | False missing alerts |
+| Direct joins to HWM_TM_REC | Use 4-table join pattern | Incomplete data |
+
+**Reference:** See TL_REPOSITORIES.md Section 0 for production CTEs, TL_TEMPLATES.md Section 0 for complete missing timecard template.
 
 ---
 

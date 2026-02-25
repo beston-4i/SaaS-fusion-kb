@@ -1,9 +1,9 @@
 # Time & Labor Templates
 
-**Module:** Time & Labor (HWM)  
-**Tag:** `#HCM #TL #HWM #Templates`  
+**Module:** Time & Labor (HWM + Custom ZMM)  
+**Tag:** `#HCM #TL #HWM #Templates #Production`  
 **Status:** Production-Ready  
-**Last Updated:** 18-Dec-2025
+**Last Updated:** 29-Jan-2026
 
 ---
 
@@ -12,10 +12,425 @@
 1. **NEVER** start timesheet queries from scratch
 2. **ALWAYS** copy these templates as complete skeletons
 3. **ALWAYS** include Period CTE → Repository CTE → Calculation → Final SELECT
-4. **ALWAYS** use `/*+ qb_name(NAME) */` hints in all CTEs
+4. **ALWAYS** use `/*+ qb_name(NAME) */` hints in all CTEs OR index hints for HWM tables
 5. **ALWAYS** use MAX version for attribute usages
+6. ⭐ **ALWAYS** use UNION for schedule assignments (LEGALEMP + ASSIGN)
+7. ⭐ **ALWAYS** apply 3-level version control for HWM_TM_REC
 
 ---
+
+## 0. PRODUCTION TEMPLATE: Missing Timecard Date Report
+
+**Purpose:** Identify employees with missing timecard submissions for scheduled working dates  
+**Use Case:** Timecard compliance tracking, payroll preparation alerts  
+**Source:** Production Missing Timecard Report (analyzed 29-Jan-2026)
+
+```sql
+/*******************************************************************************
+* REPORT: Missing Timecard Date Report
+* MODULE: Time & Labor (HWM + Custom ZMM)
+* PURPOSE: Identify active employees missing timecard submissions
+* CREATED: [DD-MON-YYYY]
+* VERSION: 1.0
+*
+* PARAMETERS:
+*   :P_FROM_DATE     - Start date (DD-MM-YYYY)
+*   :P_TO_DATE       - End date (DD-MM-YYYY)
+*   :P_PERSON_ID     - Employee filter ('ALL' or specific IDs)
+*   :P_DEPARTMENT    - Department filter ('ALL' or specific names)
+*******************************************************************************/
+
+WITH
+-- ============================================================================
+-- CTE 1: PARAMETERS
+-- ============================================================================
+PARAMETERS AS (
+    SELECT
+        TO_DATE(:P_FROM_DATE, 'DD-MM-YYYY') FROM_DATE,
+        TO_DATE(:P_TO_DATE, 'DD-MM-YYYY') TO_DATE,
+        UPPER(NVL(:P_PERSON_ID, 'ALL')) PERSON_FILTER,
+        UPPER(NVL(:P_DEPARTMENT, 'ALL')) DEPT_FILTER
+    FROM DUAL
+),
+
+-- ============================================================================
+-- CTE 2: PERSON_WITH_SCHEDULE (UNION: LEGALEMP + ASSIGN)
+-- CRITICAL: Must use UNION to capture both schedule assignment types
+-- ============================================================================
+PERSON_WITH_SCHEDULE AS (
+    -- Part 1: Legal Entity Level Schedules
+    SELECT /*+ qb_name(PWS_LE) MATERIALIZE */
+        PAPF.PERSON_ID,
+        PAPF.PERSON_NUMBER,
+        PPNF.DISPLAY_NAME,
+        PAAF.ASSIGNMENT_ID,
+        PSA.SCHEDULE_ID,
+        ZSSV.SCHEDULE_NAME,
+        PAAF.LOCATION_ID,
+        PD.NAME DEPT_NAME,
+        HAP.NAME POSITION_CODE,
+        PG.NAME GRADE_NAME,
+        PPOS.DATE_START HIRE_DATE,
+        CASE WHEN TRUNC(PAPF.START_DATE) > TRUNC(PSA.START_DATE) 
+             THEN TRUNC(PAPF.START_DATE) 
+             ELSE TRUNC(PSA.START_DATE) 
+        END START_DATE_LE,
+        TRUNC(PSA.END_DATE) END_DATE_LE,
+        NULL START_DATE,
+        NULL END_DATE
+    FROM
+        PER_ALL_PEOPLE_F          PAPF,
+        PER_PERSON_NAMES_F       PPNF,
+        PER_ALL_ASSIGNMENTS_F    PAAF,
+        PER_SCHEDULE_ASSIGNMENTS PSA,
+        ZMM_SR_SCHEDULES_VL      ZSSV,
+        PER_PERIODS_OF_SERVICE   PPOS,
+        PER_DEPARTMENTS          PD,
+        HR_ALL_POSITIONS         HAP,
+        PER_GRADES               PG,
+        PARAMETERS               P
+    WHERE PAPF.PERSON_ID       = PPNF.PERSON_ID
+      AND PAPF.PERSON_ID       = PAAF.PERSON_ID
+      AND PAPF.PERSON_ID       = PPOS.PERSON_ID
+      AND PAAF.PERIOD_OF_SERVICE_ID = PPOS.PERIOD_OF_SERVICE_ID
+      AND PAAF.LEGAL_ENTITY_ID = PSA.RESOURCE_ID
+      AND PSA.SCHEDULE_ID      = ZSSV.SCHEDULE_ID
+      AND PAAF.ORGANIZATION_ID = PD.ORGANIZATION_ID(+)
+      AND PAAF.POSITION_ID     = HAP.POSITION_ID(+)
+      AND PAAF.GRADE_ID        = PG.GRADE_ID(+)
+      AND PPNF.NAME_TYPE       = 'GLOBAL'
+      AND PSA.PRIMARY_FLAG     = 'Y'
+      AND PAAF.ASSIGNMENT_STATUS_TYPE  = 'ACTIVE'
+      AND PAAF.ASSIGNMENT_TYPE         = 'E'
+      AND PAAF.PRIMARY_ASSIGNMENT_FLAG = 'Y'
+      AND PSA.RESOURCE_TYPE            = 'LEGALEMP'
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAPF.EFFECTIVE_START_DATE) AND TRUNC(PAPF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) AND TRUNC(PAAF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PG.EFFECTIVE_START_DATE(+)) AND TRUNC(PG.EFFECTIVE_END_DATE(+))
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(HAP.EFFECTIVE_START_DATE(+)) AND TRUNC(HAP.EFFECTIVE_END_DATE(+))
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PD.EFFECTIVE_START_DATE(+)) AND TRUNC(PD.EFFECTIVE_END_DATE(+))
+      -- Parameter filters
+      AND (PAPF.PERSON_ID IN (:P_PERSON_ID) OR 'ALL' IN (:P_PERSON_ID || 'ALL'))
+      -- Exclude if assignment-level schedule exists
+      AND NOT EXISTS (
+          SELECT 1
+          FROM PER_SCHEDULE_ASSIGNMENTS PSA2,
+               ZMM_SR_AVAILABLE_DATES Z
+          WHERE PAAF.ASSIGNMENT_ID = PSA2.RESOURCE_ID
+            AND PSA2.PRIMARY_FLAG = 'Y'
+            AND PSA2.RESOURCE_TYPE = 'ASSIGN'
+            AND PSA2.SCHEDULE_ID = Z.SCHEDULE_ID
+            AND TRUNC(Z.CALENDAR_DATE) BETWEEN P.FROM_DATE AND P.TO_DATE
+            AND TRUNC(Z.CALENDAR_DATE) BETWEEN TRUNC(PSA2.START_DATE) AND TRUNC(PSA2.END_DATE)
+      )
+
+    UNION ALL
+
+    -- Part 2: Assignment Level Schedules
+    SELECT /*+ qb_name(PWS_ASG) MATERIALIZE */
+        PAPF.PERSON_ID,
+        PAPF.PERSON_NUMBER,
+        PPNF.DISPLAY_NAME,
+        PAAF.ASSIGNMENT_ID,
+        PSA.SCHEDULE_ID,
+        ZSSV.SCHEDULE_NAME,
+        PAAF.LOCATION_ID,
+        PD.NAME DEPT_NAME,
+        HAP.NAME POSITION_CODE,
+        PG.NAME GRADE_NAME,
+        PPOS.DATE_START HIRE_DATE,
+        NULL START_DATE_LE,
+        NULL END_DATE_LE,
+        CASE WHEN TRUNC(PAPF.START_DATE) > TRUNC(PSA.START_DATE) 
+             THEN TRUNC(PAPF.START_DATE) 
+             ELSE TRUNC(PSA.START_DATE) 
+        END START_DATE,
+        TRUNC(PSA.END_DATE) END_DATE
+    FROM
+        PER_ALL_PEOPLE_F          PAPF,
+        PER_PERSON_NAMES_F       PPNF,
+        PER_ALL_ASSIGNMENTS_F    PAAF,
+        PER_SCHEDULE_ASSIGNMENTS PSA,
+        ZMM_SR_SCHEDULES_VL      ZSSV,
+        PER_PERIODS_OF_SERVICE   PPOS,
+        PER_DEPARTMENTS          PD,
+        HR_ALL_POSITIONS         HAP,
+        PER_GRADES               PG,
+        PARAMETERS               P
+    WHERE PAPF.PERSON_ID      = PPNF.PERSON_ID
+      AND PAPF.PERSON_ID      = PAAF.PERSON_ID
+      AND PAPF.PERSON_ID      = PPOS.PERSON_ID
+      AND PAAF.PERIOD_OF_SERVICE_ID = PPOS.PERIOD_OF_SERVICE_ID
+      AND PAAF.ASSIGNMENT_ID  = PSA.RESOURCE_ID
+      AND PSA.SCHEDULE_ID     = ZSSV.SCHEDULE_ID
+      AND PAAF.ORGANIZATION_ID = PD.ORGANIZATION_ID(+)
+      AND PAAF.POSITION_ID     = HAP.POSITION_ID(+)
+      AND PAAF.GRADE_ID        = PG.GRADE_ID(+)
+      AND PPNF.NAME_TYPE      = 'GLOBAL'
+      AND PSA.PRIMARY_FLAG    = 'Y'
+      AND PAAF.ASSIGNMENT_STATUS_TYPE  = 'ACTIVE'
+      AND PAAF.ASSIGNMENT_TYPE         = 'E'
+      AND PAAF.PRIMARY_ASSIGNMENT_FLAG = 'Y'
+      AND PSA.RESOURCE_TYPE            = 'ASSIGN'
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAPF.EFFECTIVE_START_DATE) AND TRUNC(PAPF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PPNF.EFFECTIVE_START_DATE) AND TRUNC(PPNF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) AND TRUNC(PAAF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PG.EFFECTIVE_START_DATE(+)) AND TRUNC(PG.EFFECTIVE_END_DATE(+))
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(HAP.EFFECTIVE_START_DATE(+)) AND TRUNC(HAP.EFFECTIVE_END_DATE(+))
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PD.EFFECTIVE_START_DATE(+)) AND TRUNC(PD.EFFECTIVE_END_DATE(+))
+      -- Parameter filters
+      AND (PAPF.PERSON_ID IN (:P_PERSON_ID) OR 'ALL' IN (:P_PERSON_ID || 'ALL'))
+),
+
+-- ============================================================================
+-- CTE 3: WORKING_DATES (from ZMM_SR_AVAILABLE_DATES)
+-- ============================================================================
+WORKING_DATES AS (
+    SELECT /*+ qb_name(WORK_DATES) MATERIALIZE */
+        SCHEDULE_ID,
+        TRUNC(CALENDAR_DATE) CALENDAR_DATE
+    FROM
+        ZMM_SR_AVAILABLE_DATES,
+        PARAMETERS P
+    WHERE TRUNC(CALENDAR_DATE) BETWEEN P.FROM_DATE AND P.TO_DATE
+),
+
+-- ============================================================================
+-- CTE 4: TIME_REPORTED (with 3-level version control)
+-- ============================================================================
+TIME_REPORTED AS (
+    SELECT /*+ qb_name(TM_RPTD) MATERIALIZE */
+        /*+ index(HTR, HWM_TM_REC_U1) */
+        /*+ index(HTRGU, HWM_TM_REC_GRP_USAGES_U1) */
+        /*+ index(DTRG, HWM_TM_REC_GRP_U1) */
+        HTR.RESOURCE_ID,
+        HTR.SUBRESOURCE_ID,
+        TRUNC(HTR.START_TIME) DAY_START_TIME,
+        HTR.START_TIME,
+        HTR.STOP_TIME,
+        HTR.MEASURE
+    FROM 
+        HWM_TM_REC HTR,
+        HWM_TM_REC_GRP_USAGES HTRGU,
+        HWM_TM_REC_GRP DTRG,
+        HWM_TM_REC_GRP DTRG1,
+        HWM_TM_D_TM_UI_STATUS_V HTDTUSV,
+        PARAMETERS P
+    WHERE HTRGU.TM_REC_GRP_ID      = DTRG.TM_REC_GRP_ID
+      AND HTRGU.TM_REC_GRP_VERSION = DTRG.TM_REC_GRP_VERSION
+      AND DTRG.PARENT_TM_REC_GRP_ID = DTRG1.TM_REC_GRP_ID
+      AND DTRG.PARENT_TM_REC_GRP_VERSION = DTRG1.TM_REC_GRP_VERSION
+      AND HTR.TM_REC_ID          = HTRGU.TM_REC_ID
+      AND HTR.TM_REC_VERSION     = HTRGU.TM_REC_VERSION
+      AND DTRG1.TM_REC_GRP_ID    = HTDTUSV.TM_BLDG_BLK_ID
+      AND UPPER(HTR.UNIT_OF_MEASURE) IN ('UN', 'HR')
+      AND DTRG1.GRP_TYPE_ID      = 100
+      AND HTR.RESOURCE_TYPE      = 'PERSON'
+      AND HTR.DELETE_FLAG        IS NULL
+      AND HTR.LAYER_CODE         = 'TIME_RPTD'
+      AND TRUNC(HTR.STOP_TIME)   IS NOT NULL
+      AND NVL(HTR.LATEST_VERSION,'Y') = 'Y'
+      AND HTR.LATEST_VERSION     = 'Y'
+      AND (EXTRACT(HOUR FROM HTR.START_TIME) <> 00
+        OR EXTRACT(MINUTE FROM HTR.START_TIME) <> 00 
+        OR EXTRACT(SECOND FROM HTR.START_TIME) <> 00)
+      AND (HTDTUSV.TM_BLDG_BLK_VERSION, HTDTUSV.STATUS_ID) = (
+          SELECT MAX(TM_BLDG_BLK_VERSION), MAX(STATUS_ID) 
+          FROM HWM_TM_D_TM_UI_STATUS_V 
+          WHERE HTDTUSV.TM_BLDG_BLK_ID = TM_BLDG_BLK_ID
+      )
+      AND HTR.CREATION_DATE = (
+          SELECT MAX(HTR1.CREATION_DATE)
+          FROM HWM_TM_REC HTR1,
+               HWM_TM_REC_GRP_USAGES HTRGU1,
+               HWM_TM_REC_GRP DTRG1,
+               HWM_TM_REC_GRP DTRG2
+          WHERE HTRGU1.TM_REC_GRP_ID    = DTRG1.TM_REC_GRP_ID
+            AND HTRGU1.TM_REC_GRP_VERSION = DTRG1.TM_REC_GRP_VERSION
+            AND DTRG1.PARENT_TM_REC_GRP_ID= DTRG2.TM_REC_GRP_ID
+            AND DTRG1.PARENT_TM_REC_GRP_VERSION = DTRG2.TM_REC_GRP_VERSION
+            AND HTR1.TM_REC_ID      = HTRGU1.TM_REC_ID
+            AND HTR1.TM_REC_VERSION = HTRGU1.TM_REC_VERSION
+            AND HTR1.LATEST_VERSION = 'Y'
+            AND HTR1.DELETE_FLAG    IS NULL
+            AND HTR1.LAYER_CODE     = 'TIME_RPTD'
+            AND DTRG1.TM_REC_GRP_ID = DTRG.TM_REC_GRP_ID
+            AND HTR1.RESOURCE_ID    = HTR.RESOURCE_ID
+      )
+      AND TRUNC(HTR.START_TIME) BETWEEN P.FROM_DATE AND P.TO_DATE
+),
+
+-- ============================================================================
+-- CTE 5: PUBLIC_HOLIDAY
+-- ============================================================================
+PUBLIC_HOLIDAY AS (
+    SELECT /*+ qb_name(PUB_HOL) MATERIALIZE */
+        DISTINCT 
+        PAPF.PERSON_ID,
+        TRUNC(PCE.START_DATE_TIME) START_DATE,
+        TRUNC(PCE.END_DATE_TIME) END_DATE
+    FROM
+        PER_ALL_PEOPLE_F      PAPF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_CALENDAR_EVENTS   PCE,
+        PER_GEO_TREE_NODE_RF  PNR,
+        HR_LOCATIONS          HR,
+        PARAMETERS            P
+    WHERE PCE.TREE_CODE           = PNR.TREE_CODE
+      AND PCE.TREE_STRUCTURE_CODE = PNR.TREE_STRUCTURE_CODE
+      AND PAPF.PERSON_ID          = PAAF.PERSON_ID
+      AND PAAF.LOCATION_ID        = HR.LOCATION_ID
+      AND HR.COUNTRY              = PNR.PK1_VALUE
+      AND PCE.CATEGORY            = 'PH'
+      AND PAAF.ASSIGNMENT_STATUS_TYPE  = 'ACTIVE'
+      AND PAAF.ASSIGNMENT_TYPE         = 'E'
+      AND PAAF.PRIMARY_ASSIGNMENT_FLAG = 'Y'
+      AND TO_CHAR(PCE.START_DATE_TIME,'YYYY') = TO_CHAR(P.FROM_DATE,'YYYY')
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAPF.EFFECTIVE_START_DATE) AND TRUNC(PAPF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) AND TRUNC(PAAF.EFFECTIVE_END_DATE)
+),
+
+-- ============================================================================
+-- CTE 6: ABSENCE_DATES
+-- ============================================================================
+ABSENCE_DATES AS (
+    SELECT /*+ qb_name(ABS_DATES) MATERIALIZE */
+        APAE.PERSON_ID,
+        AATV.NAME ABSENCE_TYPE,
+        TRUNC(APAE.START_DATE) START_DATE,
+        TRUNC(APAE.END_DATE) END_DATE
+    FROM
+        ANC_PER_ABS_ENTRIES APAE,
+        ANC_ABSENCE_TYPES_VL AATV,
+        PARAMETERS P
+    WHERE APAE.ABSENCE_TYPE_ID   = AATV.ABSENCE_TYPE_ID
+      AND APAE.ABSENCE_STATUS_CD <> 'ORA_WITHDRAWN'
+      AND APAE.APPROVAL_STATUS_CD <> 'DENIED'
+      AND (APAE.START_DATE BETWEEN P.FROM_DATE AND P.TO_DATE
+        OR APAE.END_DATE BETWEEN P.FROM_DATE AND P.TO_DATE
+        OR TRUNC(APAE.END_DATE) > P.TO_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(AATV.EFFECTIVE_START_DATE) AND TRUNC(AATV.EFFECTIVE_END_DATE)
+),
+
+-- ============================================================================
+-- CTE 7: LINE_MANAGER
+-- ============================================================================
+LINE_MANAGER AS (
+    SELECT /*+ qb_name(LN_MGR) MATERIALIZE */
+        PAAF.ASSIGNMENT_ID,
+        MGR_PAPF.PERSON_NUMBER MANAGER_NUMBER,
+        MGR_PPNF.DISPLAY_NAME MANAGER_NAME
+    FROM
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_ASSIGNMENT_SUPERVISORS_F PASF,
+        PER_ALL_ASSIGNMENTS_M MGASG,
+        PER_ALL_PEOPLE_F MGR_PAPF,
+        PER_PERSON_NAMES_F MGR_PPNF
+    WHERE PAAF.ASSIGNMENT_ID = PASF.ASSIGNMENT_ID
+      AND PASF.MANAGER_ASSIGNMENT_ID = MGASG.ASSIGNMENT_ID
+      AND MGASG.PERSON_ID = MGR_PAPF.PERSON_ID
+      AND MGR_PAPF.PERSON_ID = MGR_PPNF.PERSON_ID
+      AND PASF.MANAGER_TYPE = 'LINE_MANAGER'
+      AND MGR_PPNF.NAME_TYPE = 'GLOBAL'
+      AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+      AND MGASG.EFFECTIVE_LATEST_CHANGE = 'Y'
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PAAF.EFFECTIVE_START_DATE) AND TRUNC(PAAF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(PASF.EFFECTIVE_START_DATE) AND TRUNC(PASF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(MGR_PAPF.EFFECTIVE_START_DATE) AND TRUNC(MGR_PAPF.EFFECTIVE_END_DATE)
+      AND TRUNC(SYSDATE) BETWEEN TRUNC(MGR_PPNF.EFFECTIVE_START_DATE) AND TRUNC(MGR_PPNF.EFFECTIVE_END_DATE)
+      -- Latest supervisor record
+      AND PASF.EFFECTIVE_START_DATE = (
+          SELECT MAX(S.EFFECTIVE_START_DATE)
+          FROM PER_ASSIGNMENT_SUPERVISORS_F S
+          WHERE PASF.ASSIGNMENT_ID = S.ASSIGNMENT_ID
+      )
+)
+
+-- ============================================================================
+-- FINAL SELECT: Missing Timecard Dates
+-- ============================================================================
+SELECT
+    ROW_NUMBER() OVER (ORDER BY PWS.DEPT_NAME, PWS.PERSON_NUMBER, WD.CALENDAR_DATE) S_NO,
+    PWS.PERSON_NUMBER,
+    PWS.DISPLAY_NAME EMPLOYEE_NAME,
+    TO_CHAR(PWS.HIRE_DATE, 'DD-MON-YYYY') HIRE_DATE,
+    PWS.DEPT_NAME DEPARTMENT,
+    'Active' ASSIGNMENT_STATUS,
+    PWS.SCHEDULE_NAME,
+    TO_CHAR(WD.CALENDAR_DATE, 'DD-MM-YYYY') MISSING_TIMECARD_DATE,
+    LM.MANAGER_NUMBER,
+    LM.MANAGER_NAME
+FROM
+    PERSON_WITH_SCHEDULE PWS,
+    WORKING_DATES WD,
+    LINE_MANAGER LM,
+    PARAMETERS P
+WHERE PWS.SCHEDULE_ID = WD.SCHEDULE_ID
+  -- Date falls within employee's schedule period
+  AND ((CASE WHEN WD.CALENDAR_DATE BETWEEN PWS.START_DATE AND PWS.END_DATE
+            THEN WD.CALENDAR_DATE
+        END BETWEEN PWS.START_DATE AND PWS.END_DATE)
+    OR (CASE WHEN (WD.CALENDAR_DATE NOT BETWEEN PWS.START_DATE AND PWS.END_DATE) 
+              OR PWS.START_DATE IS NULL
+            THEN WD.CALENDAR_DATE
+        END BETWEEN PWS.START_DATE_LE AND PWS.END_DATE_LE))
+  -- Join manager
+  AND PWS.ASSIGNMENT_ID = LM.ASSIGNMENT_ID(+)
+  -- NO timecard exists
+  AND NOT EXISTS (
+      SELECT 1
+      FROM TIME_REPORTED TR
+      WHERE TR.RESOURCE_ID = PWS.PERSON_ID
+        AND TR.SUBRESOURCE_ID = PWS.ASSIGNMENT_ID
+        AND TR.DAY_START_TIME = WD.CALENDAR_DATE
+  )
+  -- Exclude public holidays
+  AND NOT EXISTS (
+      SELECT 1
+      FROM PUBLIC_HOLIDAY PH
+      WHERE PH.PERSON_ID = PWS.PERSON_ID
+        AND WD.CALENDAR_DATE BETWEEN PH.START_DATE AND PH.END_DATE
+  )
+  -- Exclude absences
+  AND NOT EXISTS (
+      SELECT 1
+      FROM ABSENCE_DATES AD
+      WHERE AD.PERSON_ID = PWS.PERSON_ID
+        AND WD.CALENDAR_DATE BETWEEN AD.START_DATE AND AD.END_DATE
+  )
+  -- Department filter
+  AND (UPPER(PWS.DEPT_NAME) IN (P.DEPT_FILTER) OR P.DEPT_FILTER = 'ALL')
+  -- Only past/current dates
+  AND WD.CALENDAR_DATE <= TRUNC(SYSDATE)
+ORDER BY
+    PWS.DEPT_NAME,
+    PWS.PERSON_NUMBER,
+    WD.CALENDAR_DATE
+
+/*******************************************************************************
+* PARAMETERS:
+*   :P_FROM_DATE    - Start date (DD-MM-YYYY)
+*   :P_TO_DATE      - End date (DD-MM-YYYY)
+*   :P_PERSON_ID    - Person ID filter (or 'ALL')
+*   :P_DEPARTMENT   - Department filter (or 'ALL')
+*
+* OUTPUT:
+*   One row per employee per missing date
+*   Excludes public holidays and approved absences
+*   Only active employees with schedules
+*******************************************************************************/
+```
+
+**Parameters:**
+- `:P_FROM_DATE` - Start date (DD-MM-YYYY)
+- `:P_TO_DATE` - End date (DD-MM-YYYY)
+- `:P_PERSON_ID` - Employee ID or 'ALL'
+- `:P_DEPARTMENT` - Department name or 'ALL'
+
+---
+
+## 1. Timesheet Header CTEs
 
 ## 1. Employee Timesheet Report Template
 
@@ -908,5 +1323,18 @@ For additional OTL templates and comprehensive guides, refer to:
 - Always include USAGES_SOURCE_VERSION filter
 - Handle project/task attribute linkage
 
+**Production Templates (Section 0):**
+- Based on real production code (3,500+ lines analyzed)
+- Includes missing timecard detection
+- 3-level version control for HWM_TM_REC
+- Dual schedule assignment (UNION pattern)
+- Index hints for performance
+- Complete exclusion logic (holidays, absences)
+
 ---
+
+**Last Updated:** 29-Jan-2026  
+**Version:** 2.0 - Enhanced with Production Missing Timecard Template  
+**Status:** Production-Ready  
+**Source:** Employee Timesheet Report + OTL Queries + Missing Timecard & Overtime Reports (3,500+ lines)
 

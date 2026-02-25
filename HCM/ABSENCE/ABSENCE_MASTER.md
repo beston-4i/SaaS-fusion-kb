@@ -3,8 +3,8 @@
 **Module:** HCM Absence Management  
 **Tag:** `#HCM #ABSENCE #LEAVE #TIMEOFF`  
 **Status:** Active  
-**Last Updated:** 07-Jan-2026  
-**Version:** 2.0 (Merged with update file)
+**Last Updated:** 14-Jan-2026  
+**Version:** 3.0 (Added ANC_PER_ACRL_ENTRY_DTLS documentation and balance component patterns)
 
 ---
 
@@ -169,7 +169,9 @@ WITH PERIOD AS (
 |-------|------------|---------|
 | **APAE** | `ANC_PER_ABS_ENTRIES` | Absence Entry Header (Leave requests) |
 | **AATFT** | `ANC_ABSENCE_TYPES_F_TL` | Absence Type Master (Annual, Sick, etc.) |
-| **APACE** | `ANC_PER_ACCRUAL_ENTRIES` | Accrual Balance History |
+| **APACE** | `ANC_PER_ACCRUAL_ENTRIES` | Accrual Balance History (Summary) |
+| **APACD** | `ANC_PER_ACRL_ENTRY_DTLS` | **Accrual Transaction Details** (adjustments, carryover, encashment) |
+| **APPE** | `ANC_PER_PLAN_ENROLLMENT` | Absence Plan Enrollment (active plans for employees) |
 | **AAPV** | `ANC_ABSENCE_PLANS_VL` | Absence Plan Definitions |
 | **AATRF** | `ANC_ABSENCE_TYPE_REASONS_F` | Absence Reason Link |
 | **AARF** | `ANC_ABSENCE_REASONS_F_TL` | Absence Reason Master |
@@ -199,6 +201,138 @@ WITH PERIOD AS (
 | Alias | Table Name | Purpose |
 |-------|------------|---------|
 | **WF** | `FA_FUSION_SOAINFRA.WFTASK` | Workflow Task History |
+
+### 3.5 Plan Enrollment Table (ANC_PER_PLAN_ENROLLMENT)
+
+**Purpose:** Links employees to their enrolled absence plans with active status and enrollment dates
+
+**Alias:** APPE
+
+**Key Columns:**
+- `PER_PLAN_ENRT_ID` - Plan Enrollment ID (Primary Key)
+- `PERSON_ID` - Person ID (FK to PER_ALL_PEOPLE_F)
+- `PLAN_ID` - Absence Plan ID (FK to ANC_ABSENCE_PLANS_VL)
+- `ENRT_ST_DT` - Enrollment Start Date
+- `ENRT_END_DT` - Enrollment End Date
+- `STATUS` - Enrollment Status ('A' = Active, 'I' = Inactive)
+
+**Relationship:**
+```
+PER_ALL_PEOPLE_F (1) -----> (*) ANC_PER_PLAN_ENROLLMENT (1) -----> (*) ANC_PER_ACRL_ENTRY_DTLS
+     (PERSON_ID)                   (PER_PLAN_ENRT_ID)
+```
+
+**Standard Join:**
+```sql
+FROM ANC_PER_PLAN_ENROLLMENT APPE,
+     ANC_ABSENCE_PLANS_VL AAPV
+WHERE APPE.PLAN_ID = AAPV.ABSENCE_PLAN_ID
+  AND APPE.STATUS = 'A'
+  AND AAPV.PLAN_STATUS = 'A'
+  AND :P_EFFECTIVE_DATE BETWEEN APPE.ENRT_ST_DT AND APPE.ENRT_END_DT
+  AND :P_EFFECTIVE_DATE BETWEEN AAPV.EFFECTIVE_START_DATE AND AAPV.EFFECTIVE_END_DATE
+```
+
+**Critical Filters:**
+- Always filter `STATUS = 'A'` for active enrollments
+- Always filter by effective date within `ENRT_ST_DT` and `ENRT_END_DT`
+- Join to `ANC_ABSENCE_PLANS_VL` for plan details
+
+### 3.6 Accrual Detail Table (ANC_PER_ACRL_ENTRY_DTLS)
+
+**Purpose:** Transaction-level accrual entries for adjustments, carryovers, encashments, and all balance movements
+
+**Alias:** APACD
+
+**Key Columns:**
+- `PER_PLAN_ENRT_ID` - Link to plan enrollment (FK to ANC_PER_PLAN_ENROLLMENT)
+- `PL_ID` - Plan ID (FK to ANC_ABSENCE_PLANS_VL)
+- `PERSON_ID` - Person ID (FK to PER_ALL_PEOPLE_F)
+- `ASSIGNMENT_ID` - Assignment ID (optional, NULL for person-level transactions)
+- `TYPE` - Transaction Type (see TYPE codes below)
+- `VALUE` - Amount/Days (positive = credit, negative = debit)
+- `PROCD_DATE` - Processing/Transaction Date
+- `ADJUSTMENT_REASON` - Reason code (e.g., 'CARRYOVER', NULL for most)
+
+**TYPE Codes (Complete Reference):**
+| Code | Meaning | VALUE Sign | Use Case | Example |
+|------|---------|------------|----------|---------|
+| `ACRL` | Accrual | Positive | Regular period accrual | +2.5 days monthly |
+| `ABS` | Absence | Negative | Leave taken | -5 days vacation |
+| `COVR` | Carryover | Positive | Previous year carry forward | +10 days from PY |
+| `ADJOTH` | Adjustment Other | Positive/Negative | Manual adjustments, corrections | +2 days correction |
+| `INIT` | Initial | Positive | Initial balance setup | +30 days opening |
+| `FLDR` | Balance Days | Positive | Regular balance movement | Standard accrual |
+| `CSH` | Encashment | Negative | Cash-out of leave | -5 days encashed |
+| `COVREX` | Carryover Expiry | Negative | Expired carryover | -10 days expired |
+| `ORA_ANC_COMPTME` | Comp Time | Positive | Compensatory time off | +1 day comp time |
+| `FORFT` | Forfeiture | Negative | Forfeited leave | -15 days forfeited |
+| `ORA_ANC_FORFT_REST` | Forfeiture Restoration | Positive | Restored forfeited leave | +15 days restored |
+
+**ADJUSTMENT_REASON Codes:**
+| Code | Usage | Example |
+|------|-------|---------|
+| `CARRYOVER` | Used with `TYPE = 'ADJOTH'` to indicate carryover adjustment | Previous year balance |
+| NULL | Most transactions | Regular accruals, absences |
+
+**Relationship:**
+```
+ANC_PER_PLAN_ENROLLMENT (1) -----> (*) ANC_PER_ACRL_ENTRY_DTLS
+         (PER_PLAN_ENRT_ID)
+```
+
+**Standard Join:**
+```sql
+FROM ANC_PER_PLAN_ENROLLMENT APPE,
+     ANC_PER_ACRL_ENTRY_DTLS APACD
+WHERE APACD.PER_PLAN_ENRT_ID = APPE.PER_PLAN_ENRT_ID
+  AND APACD.PL_ID = APPE.PLAN_ID
+  AND APACD.PERSON_ID = APPE.PERSON_ID
+  AND APACD.PROCD_DATE <= :P_EFFECTIVE_DATE
+```
+
+**Critical Usage Patterns:**
+1. **Filter by Plan Period** (Calendar vs Anniversary):
+   ```sql
+   AND APACD.PROCD_DATE BETWEEN 
+       CASE WHEN AAPV.PLAN_PERIOD_TYPE = 'C' 
+            THEN TO_DATE('0101' || TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')
+            ELSE -- Anniversary logic based on hire date
+                 TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')
+       END
+       AND :E_DATE
+   ```
+
+2. **Calculate Carryover** (includes ADJOTH with CARRYOVER reason):
+   ```sql
+   SUM(CASE WHEN (APACD.TYPE = 'COVR' 
+             OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+            THEN APACD.VALUE ELSE 0 END)
+   ```
+
+3. **Calculate Adjustments** (excludes carryover):
+   ```sql
+   SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+            AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+            THEN APACD.VALUE ELSE 0 END)
+   ```
+
+**Comparison with ANC_PER_ACCRUAL_ENTRIES:**
+| Feature | ANC_PER_ACCRUAL_ENTRIES | ANC_PER_ACRL_ENTRY_DTLS |
+|---------|-------------------------|-------------------------|
+| **Granularity** | Summary (one row per period) | Transaction detail (multiple rows) |
+| **Balance** | `END_BAL` (cumulative) | `VALUE` (individual transaction) |
+| **Use Case** | Current balance queries | Adjustment/transaction analysis |
+| **Key Field** | `ACCRUAL_PERIOD` | `PROCD_DATE` + `TYPE` |
+
+**When to Use Each:**
+- Use `ANC_PER_ACCRUAL_ENTRIES` for simple current balance
+- Use `ANC_PER_ACRL_ENTRY_DTLS` for:
+  - Adjustment reports
+  - Balance component breakdown
+  - Transaction history
+  - Carryover analysis
+  - Encashment tracking
 
 ---
 
@@ -553,6 +687,175 @@ SELECT
 FROM result_table
 WHERE ABS(MANUAL_CALC - QUERY_CALC) > 0.01
 ```
+
+### 5.14 Plan Period Type (Calendar vs Anniversary) **[NEW - 14-Jan-2026]**
+
+**Rule:** Absence plans can be Calendar Year or Anniversary Year based  
+**Field:** `ANC_ABSENCE_PLANS_VL.PLAN_PERIOD_TYPE`
+
+**Values:**
+- `'C'` = Calendar Year (January 1 - December 31)
+- Other = Anniversary Year (Based on hire date)
+
+**Why Important:** Determines the plan year start/end dates for:
+- Balance calculations
+- Carryover logic
+- Accrual period determination
+- Year-end processing
+
+**Pattern:**
+```sql
+-- Calculate plan period start date
+CASE WHEN AAPV.PLAN_PERIOD_TYPE = 'C' 
+     THEN TO_DATE('0101' || TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')  -- Jan 1 of current year
+     ELSE -- Anniversary: Based on hire date
+          CASE WHEN TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY') > :E_DATE
+               THEN TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(TO_NUMBER(TO_CHAR(:E_DATE,'YYYY'))-1),'DDMMYYYY')
+          ELSE TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')
+          END
+END AS PLAN_PERIOD_START,
+
+-- Calculate plan period end date
+CASE WHEN AAPV.PLAN_PERIOD_TYPE = 'C' 
+     THEN TO_DATE('3112' || TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')  -- Dec 31 of current year
+     ELSE -- Anniversary: Day before next anniversary
+          CASE WHEN TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY') > :E_DATE
+               THEN TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY') - 1
+          ELSE TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(TO_NUMBER(TO_CHAR(:E_DATE,'YYYY'))+1),'DDMMYYYY') - 1
+          END
+END AS PLAN_PERIOD_END
+```
+
+**Usage in Balance Queries:**
+```sql
+-- Filter accrual detail transactions by plan period
+WHERE APACD.PROCD_DATE BETWEEN 
+    CASE WHEN AAPV.PLAN_PERIOD_TYPE = 'C' 
+         THEN TO_DATE('0101' || TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')
+         ELSE CASE WHEN TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY') > :E_DATE
+                   THEN TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(TO_NUMBER(TO_CHAR(:E_DATE,'YYYY'))-1),'DDMMYYYY')
+              ELSE TO_DATE(TO_CHAR(PPOS.DATE_START,'DDMM')|| TO_CHAR(:E_DATE,'YYYY'),'DDMMYYYY')
+         END
+    END
+    AND :E_DATE
+```
+
+**Scope:** All accrual balance and adjustment queries using `ANC_PER_ACRL_ENTRY_DTLS`
+
+### 5.15 Leave Balance Component Breakdown (ANC_PER_ACRL_ENTRY_DTLS) **[NEW - 14-Jan-2026]**
+
+**Rule:** Calculate comprehensive leave balance from transaction details  
+**Source Table:** `ANC_PER_ACRL_ENTRY_DTLS`  
+**Why:** Provides detailed breakdown for reporting, compliance, and audit requirements
+
+**Components:**
+
+**1. Previous Year Carryover:**
+```sql
+NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR' 
+             OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+         THEN APACD.VALUE ELSE 0 END), 0) AS PY_CARRYOVER
+```
+
+**2. Current Year Accrual:**
+```sql
+NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+         THEN APACD.VALUE ELSE 0 END), 0) AS CY_ACCRUAL
+```
+
+**3. Taken Leave** (up to effective date):
+```sql
+ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= :E_DATE
+                 THEN APACD.VALUE ELSE 0 END), 0)) AS TAKEN_LEAVE
+```
+
+**4. Booked Leave** (future approved leave):
+```sql
+ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE > :E_DATE
+                 THEN APACD.VALUE ELSE 0 END), 0)) AS BOOKED_LEAVE
+```
+
+**5. Adjustments** (manual corrections, exclude carryover):
+```sql
+NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+             AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+         THEN APACD.VALUE ELSE 0 END), 0) AS ADJUSTMENT
+```
+
+**6. Encashment** (leave cashed out):
+```sql
+NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+         THEN APACD.VALUE ELSE 0 END), 0) AS ENCASHMENT
+```
+
+**7. Carryover Expiry** (expired carryover):
+```sql
+NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+         THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY
+```
+
+**Total Balance Formula:**
+```sql
+TOTAL_BALANCE = PY_CARRYOVER + CY_ACCRUAL + ADJUSTMENT - TAKEN_LEAVE - ENCASHMENT - CARRYOVER_EXPIRY
+```
+
+**Complete Implementation CTE:**
+```sql
+WITH ACCRUAL_DETAILS AS (
+    /*+ qb_name(ACCRUAL_DETAILS) MATERIALIZE */
+    SELECT
+        PE.PERSON_ID,
+        PE.PLAN_NAME,
+        -- Component 1: Previous Year Carryover
+        NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR' 
+                       OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+                     THEN APACD.VALUE ELSE 0 END), 0) AS PY_CARRYOVER,
+        -- Component 2: Current Year Accrual
+        NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CY_ACCRUAL,
+        -- Component 3: Taken Leave
+        ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
+                         THEN APACD.VALUE ELSE 0 END), 0)) AS TAKEN_LEAVE,
+        -- Component 4: Booked Leave
+        ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE > P.EFFECTIVE_DATE
+                         THEN APACD.VALUE ELSE 0 END), 0)) AS BOOKED_LEAVE,
+        -- Component 5: Adjustments
+        NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+                     AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS ADJUSTMENT,
+        -- Component 6: Encashment
+        NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS ENCASHMENT,
+        -- Component 7: Carryover Expiry
+        NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY
+    FROM
+        PARAMETERS P,
+        PLAN_ENROLLMENT PE,
+        ANC_PER_ACRL_ENTRY_DTLS APACD
+    WHERE
+        PE.PER_PLAN_ENRT_ID = APACD.PER_PLAN_ENRT_ID
+        AND PE.PLAN_ID = APACD.PL_ID
+        -- Filter by plan period (calendar vs anniversary)
+        AND APACD.PROCD_DATE BETWEEN 
+            CASE WHEN PE.PLAN_PERIOD_TYPE = 'C' 
+                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE,'YYYY'),'DDMMYYYY')
+                 ELSE TRUNC(P.EFFECTIVE_DATE, 'YYYY')
+            END
+            AND P.EFFECTIVE_DATE
+    GROUP BY
+        PE.PERSON_ID,
+        PE.PLAN_NAME
+)
+```
+
+**Why Use This Pattern:**
+- Provides detailed breakdown for reporting and compliance
+- Enables validation and audit trail
+- Separates different types of balance movements
+- Supports regulatory reporting requirements
+
+**Scope:** Leave balance and adjustment reports requiring component-level detail
 
 ---
 

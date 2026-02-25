@@ -3,8 +3,8 @@
 **Module:** Core HR  
 **Tag:** `#HCM #HR #CoreHR`  
 **Status:** Active  
-**Last Updated:** 07-Jan-2026  
-**Version:** 2.2 (Merged with ALL critical fixes)
+**Last Updated:** 01-Feb-2026  
+**Version:** 2.7 (Added complete PER_ALL_ASSIGNMENTS_F column reference and corrected PROBATION/NOTICE columns)
 
 ---
 
@@ -45,6 +45,35 @@
     *   **Why:** SYSDATE always returns current data, breaking historical/"as of" queries.
     *   **Impact:** Critical for audit compliance, historical reporting, point-in-time analysis.
     *   **Scope:** ALL date-tracked tables (`_F`, `_TL` tables).
+
+8.  **LEAVING_REASON Location (CRITICAL):** **(NEW)**
+    *   **Rule:** LEAVING_REASON is in `PER_ACTION_REASONS_TL`, NOT in `PER_PERIODS_OF_SERVICE`
+    *   **Join Path:** PPOS → PAAF → PER_ACTION_REASONS_B → PER_ACTION_REASONS_TL (MANDATORY)
+    *   **Why:** PER_PERIODS_OF_SERVICE does NOT have a LEAVING_REASON column
+    *   **Required Filters:** EFFECTIVE_LATEST_CHANGE='Y', LANGUAGE='US', TERMINATION_DATE + 1 for date matching
+    *   **See:** Section 10.2 for complete implementation details
+
+9.  **MANAGER_ID Location (CRITICAL):** **(NEW)**
+    *   **Rule:** MANAGER_ID is in `PER_ASSIGNMENT_SUPERVISORS_F`, NOT in `PER_ALL_ASSIGNMENTS_F`
+    *   **Join Path:** PAAF → ASSIGNMENT_ID → PER_ASSIGNMENT_SUPERVISORS_F → MANAGER_ID → PER_ALL_PEOPLE_F (MANDATORY)
+    *   **Why:** PER_ALL_ASSIGNMENTS_F does NOT have a MANAGER_ID column
+    *   **Required Filters:** Date-effective filter on PASF (table is date-tracked with _F suffix)
+    *   **See:** Section 6.5 for complete implementation details
+
+10. **EMPLOYEE_CATEGORY vs ASSIGNMENT_CATEGORY (CRITICAL):** **(NEW)**
+    *   **Rule:** Use `EMPLOYEE_CATEGORY` for worker category, NOT `ASSIGNMENT_CATEGORY`
+    *   **Source:** Both exist in `PER_ALL_ASSIGNMENTS_F` but serve different purposes
+    *   **EMPLOYEE_CATEGORY:** Worker category (Employee, Contingent Worker, etc.) - Decode with lookup type 'EMPLOYEE_CATG'
+    *   **ASSIGNMENT_CATEGORY:** Assignment category code (different purpose)
+    *   **Lookup Pattern:** `HR_LOOKUPS` WHERE `LOOKUP_TYPE = 'EMPLOYEE_CATG'` AND `LOOKUP_CODE = PAAF.EMPLOYEE_CATEGORY`
+    *   **See:** Section 11.1 for complete worker category pattern
+
+11. **PROBATION & NOTICE PERIOD Columns (CORRECTED):** **(NEW)**
+    *   **Rule:** These ARE standard columns in `PER_ALL_ASSIGNMENTS_F`, NOT DFF attributes
+    *   **Probation Columns:** `DATE_PROBATION_END`, `PROBATION_PERIOD`, `PROBATION_UNIT`
+    *   **Notice Columns:** `NOTICE_PERIOD`, `NOTICE_PERIOD_UOM`
+    *   **Usage:** Direct column access, no DFF discovery needed
+    *   **Example:** `TO_CHAR(PAAF.DATE_PROBATION_END, 'DD-MM-YYYY')` or `PAAF.NOTICE_PERIOD || ' ' || PAAF.NOTICE_PERIOD_UOM`
 
 **Pattern:**
 ```sql
@@ -136,7 +165,7 @@ AND [DATE] BETWEEN PAAF.EFFECTIVE_START_DATE AND PAAF.EFFECTIVE_END_DATE
 
 | Alias | Table Name | Purpose |
 |-------|------------|---------|
-| **PAAF** | `PER_ALL_ASSIGNMENTS_F` | Assignment (Full Date-Track History) |
+| **PAAF** | `PER_ALL_ASSIGNMENTS_F` | Assignment (Full Date-Track History) - **150+ columns verified** |
 | **PAAM** | `PER_ALL_ASSIGNMENTS_M` | Assignment (Managed - Latest Changes Only) |
 | **PASF** | `PER_ASSIGNMENT_SUPERVISORS_F` | Manager/Supervisor Hierarchy |
 | **PASTT** | `PER_ASSIGNMENT_STATUS_TYPES_TL` | Assignment Status Translations |
@@ -769,11 +798,23 @@ AND (UPPER(EA.GRADE_NAME) = P.GRADE OR P.GRADE = 'ALL')
 ) LEAVING_ACTION
 ```
 
-### 10.2 Leaving Reason Pattern
+### 10.2 Leaving Reason Pattern (CRITICAL - UPDATED)
 
-**Use Case:** Get termination reason
+**Use Case:** Get termination reason for terminated employees
 
+**CRITICAL NOTE:** `LEAVING_REASON` column does **NOT** exist in `PER_PERIODS_OF_SERVICE` table.
+
+**❌ WRONG PATTERN (DO NOT USE):**
 ```sql
+-- ❌ INCORRECT - This column does not exist
+SELECT PPOS.LEAVING_REASON
+FROM PER_PERIODS_OF_SERVICE PPOS
+WHERE PPOS.ACTUAL_TERMINATION_DATE IS NOT NULL
+```
+
+**✅ CORRECT PATTERN:**
+```sql
+-- ✅ CORRECT - Get leaving reason via action reasons
 (SELECT PART.ACTION_REASON
  FROM PER_ALL_ASSIGNMENTS_M ASG1,
       PER_ACTION_REASONS_TL PART,
@@ -792,20 +833,44 @@ AND (UPPER(EA.GRADE_NAME) = P.GRADE OR P.GRADE = 'ALL')
 ) LEAVING_REASON
 ```
 
+**Key Points:**
+1. Use `PER_ALL_ASSIGNMENTS_M` (managed table) with `EFFECTIVE_LATEST_CHANGE = 'Y'`
+2. Join through `PER_ACTION_REASONS_B` using `REASON_CODE`
+3. Get translated reason from `PER_ACTION_REASONS_TL` with `LANGUAGE = 'US'`
+4. Filter by `TERMINATION_DATE + 1` for effective date matching
+5. Only applicable for terminated employees (`ACTUAL_TERMINATION_DATE IS NOT NULL`)
+
 ---
 
 ## 11. 💼 Worker Category & Type
 
 ### 11.1 Worker Category Pattern
 
+**CRITICAL:** Use `EMPLOYEE_CATEGORY`, NOT `ASSIGNMENT_CATEGORY` for worker category.
+
+**✅ CORRECT PATTERN:**
 ```sql
+-- From PER_ALL_ASSIGNMENTS_F
+SELECT PAAF.EMPLOYEE_CATEGORY  -- ✅ Correct column
+
+-- Decode to get meaning (optional)
 (SELECT MEANING 
  FROM HR_LOOKUPS 
  WHERE LOOKUP_TYPE = 'EMPLOYEE_CATG' 
- AND LOOKUP_CODE = PAAM.EMPLOYEE_CATEGORY 
+ AND LOOKUP_CODE = PAAF.EMPLOYEE_CATEGORY 
  AND ROWNUM = 1
 ) WORKER_CATEGORY
 ```
+
+**❌ WRONG PATTERN:**
+```sql
+-- ❌ INCORRECT - ASSIGNMENT_CATEGORY is different
+SELECT PAAF.ASSIGNMENT_CATEGORY  -- Wrong column for worker category
+```
+
+**Column Differences:**
+- `EMPLOYEE_CATEGORY`: Worker category (Employee, Contingent Worker, etc.)
+- `ASSIGNMENT_CATEGORY`: Assignment category code (different business purpose)
 
 ### 11.2 Payroll Time Type Pattern
 
@@ -1161,6 +1226,160 @@ PER_NATIONALITIES_TL
 -- ✅ CORRECT
 PER_CITIZENSHIPS + FND_COMMON_LOOKUPS
 ```
+
+---
+
+## 16. 📋 PER_ALL_ASSIGNMENTS_F - Complete Column Reference
+
+### 16.1 Primary Keys & Identifiers
+- `PERSON_ID` - Links to PER_ALL_PEOPLE_F
+- `ASSIGNMENT_ID` - Unique assignment identifier
+- `ASSIGNMENT_NUMBER` - Human-readable assignment number
+- `ASSIGNMENT_NAME` - Assignment name
+- `PERIOD_OF_SERVICE_ID` - Links to PER_PERIODS_OF_SERVICE
+- `WORK_TERMS_ASSIGNMENT_ID` - Work terms assignment ID
+- `PARENT_ASSIGNMENT_ID` - Parent assignment reference
+- `ASSIGNMENT_SEQUENCE` - Sequence number
+
+### 16.2 Assignment Classification
+- `ASSIGNMENT_TYPE` - 'E' (Employee), 'C' (Contingent), 'O' (Offer)
+- `ASSIGNMENT_STATUS_TYPE` - 'ACTIVE', 'INACTIVE', etc.
+- `ASSIGNMENT_STATUS_TYPE_ID` - Status type ID
+- `EMPLOYEE_CATEGORY` - ✅ **Worker category (use this for worker type)**
+- `EMPLOYMENT_CATEGORY` - Employment category
+- `ASSIGNMENT_CATEGORY` - Assignment category code
+- `SYSTEM_PERSON_TYPE` - System person type
+- `PROPOSED_WORKER_TYPE` - Proposed worker type
+
+### 16.3 Flags
+- `PRIMARY_FLAG` - 'Y' for primary assignment
+- `PRIMARY_ASSIGNMENT_FLAG` - Same as PRIMARY_FLAG
+- `PRIMARY_WORK_TERMS_FLAG` - Primary work terms flag
+- `PRIMARY_WORK_RELATION_FLAG` - Primary work relation flag
+- `MANAGER_FLAG` - ✅ **'Y' if person is a manager**
+- `AUTO_END_FLAG` - Auto end flag
+- `LABOUR_UNION_MEMBER_FLAG` - Labor union member flag
+- `WORK_AT_HOME` - Work at home flag
+- `EFFECTIVE_LATEST_CHANGE` - 'Y' for latest change (in _M tables)
+- `POSITION_OVERRIDE_FLAG` - Position override flag
+- `ALLOW_ASG_OVERRIDE_FLAG` - Allow assignment override flag
+
+### 16.4 Organizational Relationships
+- `ORGANIZATION_ID` - Department (links to PER_DEPARTMENTS)
+- `BUSINESS_UNIT_ID` - Business Unit
+- `LEGAL_ENTITY_ID` - Legal Employer
+- `LOCATION_ID` - Work location
+- `ESTABLISHMENT_ID` - Establishment ID
+- `BUSINESS_GROUP_ID` - Business group ID
+- `SOURCE_ORGANIZATION_ID` - Source organization ID
+
+### 16.5 Job & Position
+- `JOB_ID` - Links to PER_JOBS_F_VL
+- `POSITION_ID` - Links to HR_ALL_POSITIONS_F_TL
+- `GRADE_ID` - Links to PER_GRADES_F_VL
+- `PERSON_TYPE_ID` - ✅ **Links to PER_PERSON_TYPES_TL**
+
+### 16.6 Work Schedule & Time
+- `NORMAL_HOURS` - Normal working hours per period
+- `FREQUENCY` - 'W' (Weekly), 'M' (Monthly), 'D' (Daily)
+- `TIME_NORMAL_START` - Normal start time
+- `TIME_NORMAL_FINISH` - Normal finish time
+- `HOURLY_SALARIED_CODE` - Hourly/salaried indicator
+
+### 16.7 Probation & Notice Period ✅ **STANDARD COLUMNS**
+- `DATE_PROBATION_END` - ✅ **Probation end date**
+- `PROBATION_PERIOD` - ✅ **Probation period value**
+- `PROBATION_UNIT` - ✅ **Probation period unit**
+- `NOTICE_PERIOD` - ✅ **Notice period value**
+- `NOTICE_PERIOD_UOM` - ✅ **Notice period unit of measure**
+
+### 16.8 Contract & Vendor
+- `CONTRACT_ID` - Contract ID
+- `VENDOR_ID` - Vendor ID
+- `VENDOR_SITE_ID` - Vendor site ID
+- `VENDOR_ASSIGNMENT_NUMBER` - Vendor assignment number
+- `VENDOR_EMPLOYEE_NUMBER` - Vendor employee number
+
+### 16.9 Recruitment
+- `RECRUITER_ID` - Recruiter person ID
+- `RECRUITMENT_ACTIVITY_ID` - Recruitment activity ID
+- `VACANCY_ID` - Vacancy ID
+- `POSTING_CONTENT_ID` - Posting content ID
+- `JOB_POST_SOURCE_NAME` - Job post source name
+- `PERSON_REFERRED_BY_ID` - Referrer person ID
+- `APPLICANT_RANK` - Applicant rank
+
+### 16.10 Compensation & Payroll
+- `PEOPLE_GROUP_ID` - People group ID
+- `SOFT_CODING_KEYFLEX_ID` - Soft coding key flexfield
+- `DEFAULT_CODE_COMB_ID` - Default code combination ID
+- `SET_OF_BOOKS_ID` - Set of books ID
+- `SAL_REVIEW_PERIOD` - Salary review period
+- `SAL_REVIEW_PERIOD_FREQUENCY` - Salary review frequency
+
+### 16.11 Career Progression
+- `GRADE_LADDER_PGM_ID` - Grade ladder program ID
+- `CAGR_ID_FLEX_NUM` - Career grade flex number
+- `CAGR_GRADE_DEF_ID` - Career grade definition ID
+- `SPECIAL_CEILING_STEP_ID` - Special ceiling step ID
+- `STEP_ENTRY_DATE` - Step entry date
+
+### 16.12 Retirement
+- `RETIREMENT_AGE` - Retirement age
+- `RETIREMENT_DATE` - Retirement date
+
+### 16.13 Project & Billing
+- `PROJECT_TITLE` - Project title
+- `BILLING_TITLE` - Billing title
+
+### 16.14 Date-Effective Tracking
+- `EFFECTIVE_START_DATE` - Start date of this record version
+- `EFFECTIVE_END_DATE` - End date of this record version
+- `EFFECTIVE_SEQUENCE` - Sequence number for same-day changes
+- `PROJECTED_START_DATE` - Projected start date
+- `PROJECTED_ASSIGNMENT_END` - Projected end date
+- `FREEZE_START_DATE` - Freeze start date
+- `FREEZE_UNTIL_DATE` - Freeze until date
+
+### 16.15 Action & Reason
+- `ACTION_CODE` - Action code
+- `REASON_CODE` - Reason code (for termination lookup)
+- `ACTION_OCCURRENCE_ID` - Action occurrence ID
+
+### 16.16 Labor Relations
+- `BARGAINING_UNIT_CODE` - Bargaining unit code
+- `COLLECTIVE_AGREEMENT_ID` - Collective agreement ID
+
+### 16.17 Location Details
+- `INTERNAL_LOCATION` - Internal location
+- `INTERNAL_BUILDING` - Internal building
+- `INTERNAL_FLOOR` - Internal floor
+- `INTERNAL_OFFICE_NUMBER` - Internal office number
+- `INTERNAL_MAILSTOP` - Internal mail stop
+- `EXPENSE_CHECK_ADDRESS` - Expense check address
+
+### 16.18 Purchase Order
+- `PO_HEADER_ID` - Purchase order header ID
+- `PO_LINE_ID` - Purchase order line ID
+
+### 16.19 Miscellaneous
+- `LEGISLATION_CODE` - Legislation code
+- `LINKAGE_TYPE` - Linkage type
+- `SOURCE_TYPE` - Source type
+- `DUTIES_TYPE` - Duties type
+- `ASS_ATTRIBUTE_CATEGORY` - Assignment attribute category
+- `ID_FLEX_NUM` - ID flex number
+
+### 16.20 WHO Columns (Audit Trail)
+- `LAST_UPDATE_DATE` - Last update timestamp
+- `LAST_UPDATED_BY` - User who last updated
+- `LAST_UPDATE_LOGIN` - Login session of last update
+- `CREATION_DATE` - Creation timestamp
+- `CREATED_BY` - User who created
+- `OBJECT_VERSION_NUMBER` - Object version number
+
+### 16.21 ❌ Columns That DO NOT EXIST
+- ❌ `MANAGER_ID` - Use `PER_ASSIGNMENT_SUPERVISORS_F.MANAGER_ID` instead
 
 ---
 

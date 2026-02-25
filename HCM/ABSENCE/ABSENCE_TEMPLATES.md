@@ -3,8 +3,8 @@
 **Module:** HCM Absence Management  
 **Purpose:** Ready-to-use templates for absence/leave reports  
 **Tag:** `#HCM #ABSENCE #TEMPLATES #REPORTS`  
-**Last Updated:** 07-Jan-2026  
-**Version:** 2.0 (Merged with update file)
+**Last Updated:** 14-Jan-2026  
+**Version:** 3.0 (Added Leave Adjustment Report template)
 
 ---
 
@@ -18,6 +18,7 @@
 | **T4: Leave Details Report** | Comprehensive leave with workflow and supervisor | Complex | DEPARTMENTS, ANNUAL_LEAVE_BALANCE, SUPERVISOR, LEAVE_DETAILS (with workflow) |
 | **T5: Leave Summary Report** | Aggregated leave statistics by type | Medium | PERIOD, EMP_MASTER, LEAVE_TRANSACTIONS |
 | **T7: Employee Annual Leave Balance** | Comprehensive balance with all components (PY/CY breakdown) | High | PARAMETERS, EMP_BASE, EMP_ASSIGNMENT, EMP_DFF, PLAN_ENROLLMENT, ACCRUAL_BALANCE |
+| **T8: Leave Adjustment Report** | **Detailed balance with adjustments, carryover, encashment** | High | PARAMETERS, EMP_BASE, EMP_ORG, PLAN_ENROLLMENT_ACTIVE, ACCRUAL_ENTRY_DETAILS |
 
 ---
 
@@ -1700,6 +1701,231 @@ Verify all constraints from ABSENCE_MASTER.md are applied:
 
 ---
 
+## TEMPLATE 8: Leave Adjustment Report **[NEW - 14-Jan-2026]**
+
+### Purpose
+Generate detailed leave balance report with all adjustment components breakdown (carryover, accruals, adjustments, taken leave, encashment, and expiry).
+
+### Business Use Case
+HR needs comprehensive leave balance reports showing:
+- Previous year carryover amounts
+- Current year accruals
+- Manual adjustments made
+- Leave taken and booked
+- Encashments processed
+- Carryover expirations
+
+### Input Parameters
+```sql
+:P_EFFECTIVE_DATE     -- Report as-of date (DD-MON-YYYY)
+:P_PERSON_NUMBER      -- Employee number ('ALL' for all employees)
+:P_ABSENCE_PLAN       -- Plan name ('ALL' for all plans)
+:P_LEGAL_EMPLOYER     -- Legal entity ('ALL' for all entities)
+```
+
+### Output Columns (15)
+1. Person Number
+2. Person Name
+3. Department
+4. Grade
+5. Absence Plan Name
+6. Previous Year Carryover
+7. Current Year Accrual
+8. Total Adjustments
+9. Taken Leave
+10. Booked Leave (Future)
+11. Encashment
+12. Carryover Expiry
+13. Total Balance
+14. Hire Date
+15. Service Years
+
+### SQL Template
+```sql
+WITH PARAMETERS AS (
+    /*+ qb_name(PARAMETERS) MATERIALIZE */
+    SELECT
+        TRUNC(TO_DATE(:P_EFFECTIVE_DATE, 'DD-MON-YYYY')) AS EFFECTIVE_DATE,
+        UPPER(NVL(:P_PERSON_NUMBER, 'ALL')) AS PERSON_NUMBER,
+        UPPER(NVL(:P_ABSENCE_PLAN, 'ALL')) AS ABSENCE_PLAN,
+        UPPER(NVL(:P_LEGAL_EMPLOYER, 'ALL')) AS LEGAL_EMPLOYER
+    FROM DUAL
+),
+EMP_BASE AS (
+    /*+ qb_name(EMP_BASE) MATERIALIZE */
+    SELECT
+        PAPF.PERSON_ID,
+        PAPF.PERSON_NUMBER,
+        PPNF.FULL_NAME,
+        PPNF.DISPLAY_NAME,
+        PAAF.ASSIGNMENT_ID,
+        PAAF.PERIOD_OF_SERVICE_ID,
+        ROUND(MONTHS_BETWEEN(P.EFFECTIVE_DATE, PPOS.DATE_START) / 12, 2) AS SERVICE_YEARS,
+        TO_CHAR(PPOS.DATE_START, 'DD-MON-YYYY') AS HIRE_DATE
+    FROM
+        PARAMETERS P,
+        PER_ALL_PEOPLE_F PAPF,
+        PER_PERSON_NAMES_F PPNF,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        PER_PERIODS_OF_SERVICE PPOS
+    WHERE
+        PAPF.PERSON_ID = PPNF.PERSON_ID
+        AND PAPF.PERSON_ID = PAAF.PERSON_ID
+        AND PAAF.PERIOD_OF_SERVICE_ID = PPOS.PERIOD_OF_SERVICE_ID
+        AND PPNF.NAME_TYPE = 'GLOBAL'
+        AND PAAF.PRIMARY_FLAG = 'Y'
+        AND PAAF.ASSIGNMENT_TYPE = 'E'
+        AND PAAF.ASSIGNMENT_STATUS_TYPE = 'ACTIVE'
+        AND P.EFFECTIVE_DATE BETWEEN PAPF.EFFECTIVE_START_DATE AND PAPF.EFFECTIVE_END_DATE
+        AND P.EFFECTIVE_DATE BETWEEN PPNF.EFFECTIVE_START_DATE AND PPNF.EFFECTIVE_END_DATE
+        AND P.EFFECTIVE_DATE BETWEEN PAAF.EFFECTIVE_START_DATE AND PAAF.EFFECTIVE_END_DATE
+        AND (UPPER(PAPF.PERSON_NUMBER) = P.PERSON_NUMBER OR P.PERSON_NUMBER = 'ALL')
+),
+EMP_ORG AS (
+    /*+ qb_name(EMP_ORG) MATERIALIZE */
+    SELECT
+        EB.PERSON_ID,
+        HAOUTL.NAME AS DEPARTMENT_NAME,
+        PG.GRADE_CODE
+    FROM
+        PARAMETERS P,
+        EMP_BASE EB,
+        PER_ALL_ASSIGNMENTS_F PAAF,
+        HR_ORGANIZATION_UNITS_F_TL HAOUTL,
+        PER_GRADES_F_VL PG
+    WHERE
+        EB.ASSIGNMENT_ID = PAAF.ASSIGNMENT_ID
+        AND PAAF.ORGANIZATION_ID = HAOUTL.ORGANIZATION_ID(+)
+        AND PAAF.GRADE_ID = PG.GRADE_ID(+)
+        AND HAOUTL.LANGUAGE(+) = 'US'
+        AND P.EFFECTIVE_DATE BETWEEN PAAF.EFFECTIVE_START_DATE AND PAAF.EFFECTIVE_END_DATE
+        AND P.EFFECTIVE_DATE BETWEEN HAOUTL.EFFECTIVE_START_DATE(+) AND HAOUTL.EFFECTIVE_END_DATE(+)
+        AND P.EFFECTIVE_DATE BETWEEN PG.EFFECTIVE_START_DATE(+) AND PG.EFFECTIVE_END_DATE(+)
+),
+PLAN_ENROLLMENT_ACTIVE AS (
+    /*+ qb_name(PLAN_ENROLLMENT_ACTIVE) MATERIALIZE */
+    SELECT
+        APPE.PER_PLAN_ENRT_ID,
+        APPE.PERSON_ID,
+        APPE.PLAN_ID,
+        AAPV.NAME AS PLAN_NAME,
+        AAPV.PLAN_PERIOD_TYPE
+    FROM
+        PARAMETERS P,
+        EMP_BASE EB,
+        ANC_PER_PLAN_ENROLLMENT APPE,
+        ANC_ABSENCE_PLANS_VL AAPV
+    WHERE
+        EB.PERSON_ID = APPE.PERSON_ID
+        AND APPE.PLAN_ID = AAPV.ABSENCE_PLAN_ID
+        AND APPE.STATUS = 'A'
+        AND AAPV.PLAN_STATUS = 'A'
+        AND P.EFFECTIVE_DATE BETWEEN APPE.ENRT_ST_DT AND APPE.ENRT_END_DT
+        AND P.EFFECTIVE_DATE BETWEEN AAPV.EFFECTIVE_START_DATE AND AAPV.EFFECTIVE_END_DATE
+        AND (UPPER(AAPV.NAME) = P.ABSENCE_PLAN OR P.ABSENCE_PLAN = 'ALL')
+),
+ACCRUAL_ENTRY_DETAILS AS (
+    /*+ qb_name(ACCRUAL_ENTRY_DETAILS) MATERIALIZE */
+    SELECT
+        PEA.PERSON_ID,
+        PEA.PLAN_NAME,
+        NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR' 
+                       OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+                     THEN APACD.VALUE ELSE 0 END), 0) AS PY_CARRYOVER,
+        NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CY_ACCRUAL,
+        ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
+                         THEN APACD.VALUE ELSE 0 END), 0)) AS TAKEN_LEAVE,
+        ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE > P.EFFECTIVE_DATE
+                         THEN APACD.VALUE ELSE 0 END), 0)) AS BOOKED_LEAVE,
+        NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+                     AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS ADJUSTMENT,
+        NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS ENCASHMENT,
+        NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY
+    FROM
+        PARAMETERS P,
+        PLAN_ENROLLMENT_ACTIVE PEA,
+        ANC_PER_ACRL_ENTRY_DTLS APACD
+    WHERE
+        PEA.PER_PLAN_ENRT_ID = APACD.PER_PLAN_ENRT_ID
+        AND PEA.PLAN_ID = APACD.PL_ID
+        AND APACD.PROCD_DATE BETWEEN 
+            CASE WHEN PEA.PLAN_PERIOD_TYPE = 'C' 
+                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE,'YYYY'),'DDMMYYYY')
+                 ELSE TRUNC(P.EFFECTIVE_DATE, 'YYYY')
+            END
+            AND P.EFFECTIVE_DATE
+    GROUP BY
+        PEA.PERSON_ID,
+        PEA.PLAN_NAME
+)
+SELECT
+    EB.PERSON_NUMBER,
+    EB.DISPLAY_NAME AS PERSON_NAME,
+    EO.DEPARTMENT_NAME,
+    EO.GRADE_CODE AS GRADE,
+    AED.PLAN_NAME,
+    ROUND(AED.PY_CARRYOVER, 2) AS PREVIOUS_YEAR_CARRYOVER,
+    ROUND(AED.CY_ACCRUAL, 2) AS CURRENT_YEAR_ACCRUAL,
+    ROUND(AED.ADJUSTMENT, 2) AS TOTAL_ADJUSTMENTS,
+    ROUND(AED.TAKEN_LEAVE, 2) AS TAKEN_LEAVE,
+    ROUND(AED.BOOKED_LEAVE, 2) AS BOOKED_LEAVE,
+    ROUND(AED.ENCASHMENT, 2) AS ENCASHMENT,
+    ROUND(AED.CARRYOVER_EXPIRY, 2) AS CARRYOVER_EXPIRY,
+    ROUND(AED.PY_CARRYOVER + AED.CY_ACCRUAL + AED.ADJUSTMENT 
+          - AED.TAKEN_LEAVE - AED.ENCASHMENT - AED.CARRYOVER_EXPIRY, 2) AS TOTAL_BALANCE,
+    EB.HIRE_DATE,
+    EB.SERVICE_YEARS
+FROM
+    EMP_BASE EB,
+    EMP_ORG EO,
+    ACCRUAL_ENTRY_DETAILS AED
+WHERE
+    EB.PERSON_ID = EO.PERSON_ID
+    AND EB.PERSON_ID = AED.PERSON_ID
+ORDER BY
+    EB.PERSON_NUMBER,
+    AED.PLAN_NAME
+```
+
+### Key Features
+- Uses `ANC_PER_ACRL_ENTRY_DTLS` for detailed balance breakdown
+- Handles Calendar vs Anniversary plan periods automatically
+- Includes all 7 balance components
+- Filters by plan enrollment dates for accuracy
+- No semicolon at end (BI Publisher compatible)
+- Oracle old-style joins throughout
+- MATERIALIZE hints for performance
+
+### Dependencies
+- Requires PARAMETERS CTE (Enhanced with case-insensitive filtering)
+- Requires EMP_BASE CTE (with service calculation)
+- Requires PLAN_ENROLLMENT_ACTIVE CTE (from ABSENCE_REPOSITORIES.md #43)
+- Requires ACCRUAL_ENTRY_DETAILS CTE (from ABSENCE_REPOSITORIES.md #44)
+
+### Performance
+- Expected runtime: 15-60 seconds (depending on data volume)
+- Record count: 100-10,000 (one row per person per plan)
+- Optimized with MATERIALIZE hints on all CTEs
+
+### Use Cases
+- Leave balance reports requiring detailed component breakdown
+- Adjustment tracking and audit reports
+- Year-end balance reports
+- Encashment reports
+- Regulatory compliance reports
+
+### Validation
+Verify total balance calculation:
+```sql
+TOTAL_BALANCE = PY_CARRYOVER + CY_ACCRUAL + ADJUSTMENTS - TAKEN_LEAVE - ENCASHMENT - CARRYOVER_EXPIRY
+```
+
+---
+
 ## 📊 Expected Performance
 
 | Template | Complexity | Expected Runtime | Records Returned |
@@ -1710,16 +1936,17 @@ Verify all constraints from ABSENCE_MASTER.md are applied:
 | T4: Leave Details | Complex | < 20 seconds | 100-1,000 |
 | T5: Leave Summary | Medium | < 10 seconds | 100-1,000 |
 | T7: Annual Leave Balance | High | 10-60 seconds | 100-10,000 |
+| T8: Leave Adjustment | High | 15-60 seconds | 100-10,000 |
 
 *Performance estimates based on typical HCM environments with 1,000-10,000 employees.*
 
-**Note:** T4 (Leave Details) and T7 (Annual Leave Balance) include workflow and comprehensive balance calculations which may require additional time.
+**Note:** T4 (Leave Details), T7 (Annual Leave Balance), and T8 (Leave Adjustment) include workflow and/or comprehensive balance component calculations which may require additional time.
 
 ---
 
 **END OF ABSENCE_TEMPLATES.md**
 
-**Status:** Merged and Complete  
-**Last Merged:** 07-Jan-2026  
-**Source Files:** ABSENCE_TEMPLATES.md + ABSENCE_TEMPLATES_UPDATE_31-12-25.md  
-**Version:** 2.0
+**Status:** Updated with Leave Adjustment Report  
+**Last Updated:** 14-Jan-2026  
+**Source Files:** ABSENCE_TEMPLATES.md + ABSENCE_TEMPLATES_UPDATE_31-12-25.md + Production SQL Analysis (14-Jan-2026)  
+**Version:** 3.0
