@@ -1809,7 +1809,9 @@ PLAN_ENROLLMENT_ACTIVE AS (
         APPE.PERSON_ID,
         APPE.PLAN_ID,
         AAPV.NAME AS PLAN_NAME,
-        AAPV.PLAN_PERIOD_TYPE
+        AAPV.PLAN_PERIOD_TYPE,
+        -- Hire date required for anniversary plan period start calculation
+        EB.HIRE_DATE_RAW AS HIRE_DATE
     FROM
         PARAMETERS P,
         EMP_BASE EB,
@@ -1844,7 +1846,24 @@ ACCRUAL_ENTRY_DETAILS AS (
         NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
                      THEN APACD.VALUE ELSE 0 END), 0) AS ENCASHMENT,
         NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
-                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY,
+        -- TOTAL_BALANCE: explicit formula — do NOT use SUM(VALUE)
+        -- TAKEN_LEAVE uses ABS() so it is already positive; must subtract it explicitly
+        NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR'
+                       OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+                     THEN APACD.VALUE ELSE 0 END), 0)
+        + NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+                       THEN APACD.VALUE ELSE 0 END), 0)
+        + NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+                       AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+                       THEN APACD.VALUE ELSE 0 END), 0)
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        AS TOTAL_BALANCE
     FROM
         PARAMETERS P,
         PLAN_ENROLLMENT_ACTIVE PEA,
@@ -1852,10 +1871,26 @@ ACCRUAL_ENTRY_DETAILS AS (
     WHERE
         PEA.PER_PLAN_ENRT_ID = APACD.PER_PLAN_ENRT_ID
         AND PEA.PLAN_ID = APACD.PL_ID
-        AND APACD.PROCD_DATE BETWEEN 
-            CASE WHEN PEA.PLAN_PERIOD_TYPE = 'C' 
-                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE,'YYYY'),'DDMMYYYY')
-                 ELSE TRUNC(P.EFFECTIVE_DATE, 'YYYY')
+        -- Calendar plans: Jan 1 of effective year
+        -- Anniversary plans: hire-date anniversary in effective year
+        --   (step back one year if anniversary has not yet occurred)
+        AND APACD.PROCD_DATE BETWEEN
+            CASE WHEN PEA.PLAN_PERIOD_TYPE = 'C'
+                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'), 'DDMMYYYY')
+                 ELSE CASE
+                          WHEN TO_DATE(
+                                   TO_CHAR(PEA.HIRE_DATE, 'DDMM') || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'),
+                                   'DDMMYYYY'
+                               ) <= P.EFFECTIVE_DATE
+                          THEN TO_DATE(
+                                   TO_CHAR(PEA.HIRE_DATE, 'DDMM') || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'),
+                                   'DDMMYYYY'
+                               )
+                          ELSE TO_DATE(
+                                   TO_CHAR(PEA.HIRE_DATE, 'DDMM') || TO_CHAR(ADD_MONTHS(P.EFFECTIVE_DATE, -12), 'YYYY'),
+                                   'DDMMYYYY'
+                               )
+                      END
             END
             AND P.EFFECTIVE_DATE
     GROUP BY

@@ -799,6 +799,10 @@ NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
 TOTAL_BALANCE = PY_CARRYOVER + CY_ACCRUAL + ADJUSTMENT - TAKEN_LEAVE - ENCASHMENT - CARRYOVER_EXPIRY
 ```
 
+**Critical:** Do NOT implement `TOTAL_BALANCE` as `SUM(APACD.VALUE)`. Because `TAKEN_LEAVE` and `BOOKED_LEAVE` use `ABS()` to display as positive numbers, a raw sum of all transaction values produces incorrect results — the sign correction is already applied to those components, so they must be explicitly subtracted in the formula rather than included as-is.
+
+**Anniversary Plan Period:** For plans with `PLAN_PERIOD_TYPE <> 'C'`, the period start must be the employee's hire-date anniversary — not `TRUNC(effective_date, 'YYYY')` (which always returns Jan 1). The `PLAN_ENROLLMENT` CTE must expose `HIRE_DATE` so the period start can be computed as the hire-date month/day in the effective year, stepping back one year if the anniversary has not yet occurred.
+
 **Complete Implementation CTE:**
 ```sql
 WITH ACCRUAL_DETAILS AS (
@@ -813,22 +817,39 @@ WITH ACCRUAL_DETAILS AS (
         -- Component 2: Current Year Accrual
         NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
                      THEN APACD.VALUE ELSE 0 END), 0) AS CY_ACCRUAL,
-        -- Component 3: Taken Leave
+        -- Component 3: Taken Leave (ABS converts negative DB value to positive for display)
         ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
                          THEN APACD.VALUE ELSE 0 END), 0)) AS TAKEN_LEAVE,
-        -- Component 4: Booked Leave
+        -- Component 4: Booked Leave (ABS converts negative DB value to positive for display)
         ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE > P.EFFECTIVE_DATE
                          THEN APACD.VALUE ELSE 0 END), 0)) AS BOOKED_LEAVE,
         -- Component 5: Adjustments
         NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
                      AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
                      THEN APACD.VALUE ELSE 0 END), 0) AS ADJUSTMENT,
-        -- Component 6: Encashment
+        -- Component 6: Encashment (raw negative value; subtracted explicitly in TOTAL_BALANCE)
         NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
                      THEN APACD.VALUE ELSE 0 END), 0) AS ENCASHMENT,
-        -- Component 7: Carryover Expiry
+        -- Component 7: Carryover Expiry (raw negative value; subtracted explicitly in TOTAL_BALANCE)
         NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
-                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY
+                     THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY,
+        -- Total Balance: explicit formula; do NOT use SUM(VALUE) — TAKEN_LEAVE uses ABS()
+        -- so a raw sum would produce incorrect results when debit components are mixed
+        NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR'
+                       OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+                     THEN APACD.VALUE ELSE 0 END), 0)
+        + NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+                       THEN APACD.VALUE ELSE 0 END), 0)
+        + NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+                       AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+                       THEN APACD.VALUE ELSE 0 END), 0)
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        AS TOTAL_BALANCE
     FROM
         PARAMETERS P,
         PLAN_ENROLLMENT PE,
@@ -836,11 +857,27 @@ WITH ACCRUAL_DETAILS AS (
     WHERE
         PE.PER_PLAN_ENRT_ID = APACD.PER_PLAN_ENRT_ID
         AND PE.PLAN_ID = APACD.PL_ID
-        -- Filter by plan period (calendar vs anniversary)
-        AND APACD.PROCD_DATE BETWEEN 
-            CASE WHEN PE.PLAN_PERIOD_TYPE = 'C' 
-                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE,'YYYY'),'DDMMYYYY')
-                 ELSE TRUNC(P.EFFECTIVE_DATE, 'YYYY')
+        -- Calendar plans: period starts Jan 1 of the effective year
+        -- Anniversary plans: period starts on the employee's hire-date anniversary
+        --   If the anniversary in the effective year has already passed → use it
+        --   If the anniversary in the effective year is still future → step back one year
+        AND APACD.PROCD_DATE BETWEEN
+            CASE WHEN PE.PLAN_PERIOD_TYPE = 'C'
+                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'), 'DDMMYYYY')
+                 ELSE CASE
+                          WHEN TO_DATE(
+                                   TO_CHAR(PE.HIRE_DATE, 'DDMM') || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'),
+                                   'DDMMYYYY'
+                               ) <= P.EFFECTIVE_DATE
+                          THEN TO_DATE(
+                                   TO_CHAR(PE.HIRE_DATE, 'DDMM') || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'),
+                                   'DDMMYYYY'
+                               )
+                          ELSE TO_DATE(
+                                   TO_CHAR(PE.HIRE_DATE, 'DDMM') || TO_CHAR(ADD_MONTHS(P.EFFECTIVE_DATE, -12), 'YYYY'),
+                                   'DDMMYYYY'
+                               )
+                      END
             END
             AND P.EFFECTIVE_DATE
     GROUP BY

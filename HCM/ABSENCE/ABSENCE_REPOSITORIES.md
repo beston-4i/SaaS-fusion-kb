@@ -982,13 +982,17 @@ WITH PLAN_ENROLLMENT_ACTIVE AS (
         AAPV.NAME AS PLAN_NAME,
         AAPV.PLAN_PERIOD_TYPE,
         AAPV.PLAN_UOM,
-        AAPV.PLAN_STATUS
+        AAPV.PLAN_STATUS,
+        -- Hire date required for anniversary plan period calculations
+        EB.HIRE_DATE_RAW AS HIRE_DATE
     FROM
         PARAMETERS P,
+        EMP_BASE EB,
         ANC_PER_PLAN_ENROLLMENT APPE,
         ANC_ABSENCE_PLANS_VL AAPV
     WHERE
-        APPE.PLAN_ID = AAPV.ABSENCE_PLAN_ID
+        EB.PERSON_ID = APPE.PERSON_ID
+        AND APPE.PLAN_ID = AAPV.ABSENCE_PLAN_ID
         AND APPE.STATUS = 'A'
         AND AAPV.PLAN_STATUS = 'A'
         AND P.EFFECTIVE_DATE BETWEEN APPE.ENRT_ST_DT AND APPE.ENRT_END_DT
@@ -1008,6 +1012,7 @@ WITH PLAN_ENROLLMENT_ACTIVE AS (
 - `PLAN_PERIOD_TYPE` - Calendar ('C') or Anniversary
 - `PLAN_UOM` - Unit of measure (Days/Hours)
 - `PLAN_STATUS` - Plan status ('A' = Active)
+- `HIRE_DATE` - Employee hire date (from `EMP_BASE.HIRE_DATE_RAW`); required for anniversary plan period start calculation
 
 **Join To:**
 ```sql
@@ -1067,8 +1072,23 @@ WITH ACCRUAL_ENTRY_DETAILS AS (
         -- Component 7: Carryover Expiry
         NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
                      THEN APACD.VALUE ELSE 0 END), 0) AS CARRYOVER_EXPIRY,
-        -- Total Balance (calculated)
-        NVL(SUM(APACD.VALUE), 0) AS TOTAL_BALANCE
+        -- Total Balance: explicit formula to avoid sign errors from raw SUM
+        -- TAKEN_LEAVE and ENCASHMENT are stored as ABS() positives above, so subtract them
+        NVL(SUM(CASE WHEN (APACD.TYPE = 'COVR'
+                       OR (APACD.TYPE = 'ADJOTH' AND APACD.ADJUSTMENT_REASON = 'CARRYOVER'))
+                     THEN APACD.VALUE ELSE 0 END), 0)
+        + NVL(SUM(CASE WHEN APACD.TYPE IN ('ACRL', 'ORA_ANC_COMPTME', 'FLDR')
+                       THEN APACD.VALUE ELSE 0 END), 0)
+        + NVL(SUM(CASE WHEN APACD.TYPE IN ('ADJOTH', 'INIT')
+                       AND NVL(APACD.ADJUSTMENT_REASON, 'X') <> 'CARRYOVER'
+                       THEN APACD.VALUE ELSE 0 END), 0)
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'ABS' AND APACD.PROCD_DATE <= P.EFFECTIVE_DATE
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'CSH'
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        - ABS(NVL(SUM(CASE WHEN APACD.TYPE = 'COVREX'
+                            THEN APACD.VALUE ELSE 0 END), 0))
+        AS TOTAL_BALANCE
     FROM
         PARAMETERS P,
         PLAN_ENROLLMENT_ACTIVE PEA,
@@ -1077,12 +1097,30 @@ WITH ACCRUAL_ENTRY_DETAILS AS (
         PEA.PER_PLAN_ENRT_ID = APACD.PER_PLAN_ENRT_ID
         AND PEA.PLAN_ID = APACD.PL_ID
         -- Plan period filter (calendar vs anniversary)
-        AND APACD.PROCD_DATE BETWEEN 
-            CASE WHEN PEA.PLAN_PERIOD_TYPE = 'C' 
-                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE,'YYYY'),'DDMMYYYY')
-                 ELSE -- Anniversary logic: Use hire date for period start
-                      -- Note: Requires join to PPOS in outer query for full accuracy
-                      TRUNC(P.EFFECTIVE_DATE, 'YYYY')
+        -- Calendar plans: period starts Jan 1 of the effective year
+        -- Anniversary plans: period starts on the employee's hire date anniversary
+        --   e.g. hire date = 15-Mar-2020, effective date = 20-Nov-2024
+        --        anniversary start = 15-Mar-2024 (same year if anniversary already passed)
+        --        anniversary start = 15-Mar-2023 (prior year if anniversary not yet reached)
+        AND APACD.PROCD_DATE BETWEEN
+            CASE WHEN PEA.PLAN_PERIOD_TYPE = 'C'
+                 THEN TO_DATE('0101' || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'), 'DDMMYYYY')
+                 ELSE -- Anniversary: reconstruct hire-date month/day in the effective year,
+                      -- then step back one year if that date is still in the future
+                      CASE
+                          WHEN TO_DATE(
+                                   TO_CHAR(PEA.HIRE_DATE, 'DDMM') || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'),
+                                   'DDMMYYYY'
+                               ) <= P.EFFECTIVE_DATE
+                          THEN TO_DATE(
+                                   TO_CHAR(PEA.HIRE_DATE, 'DDMM') || TO_CHAR(P.EFFECTIVE_DATE, 'YYYY'),
+                                   'DDMMYYYY'
+                               )
+                          ELSE TO_DATE(
+                                   TO_CHAR(PEA.HIRE_DATE, 'DDMM') || TO_CHAR(ADD_MONTHS(P.EFFECTIVE_DATE, -12), 'YYYY'),
+                                   'DDMMYYYY'
+                               )
+                      END
             END
             AND P.EFFECTIVE_DATE
     GROUP BY
@@ -1095,12 +1133,12 @@ WITH ACCRUAL_ENTRY_DETAILS AS (
 **Columns Provided:**
 - `PY_CARRYOVER` - Previous year balance carried forward
 - `CY_ACCRUAL` - Current year accrued leave
-- `TAKEN_LEAVE` - Leave taken to date (positive value)
-- `BOOKED_LEAVE` - Future approved leave (positive value)
+- `TAKEN_LEAVE` - Leave taken to date (positive value via `ABS()`)
+- `BOOKED_LEAVE` - Future approved leave (positive value via `ABS()`)
 - `ADJUSTMENT` - Manual adjustments (positive or negative)
-- `ENCASHMENT` - Leave encashed/cashed out
-- `CARRYOVER_EXPIRY` - Expired carryover
-- `TOTAL_BALANCE` - Net balance (all components summed)
+- `ENCASHMENT` - Leave encashed/cashed out (raw value; negative in DB)
+- `CARRYOVER_EXPIRY` - Expired carryover (raw value; negative in DB)
+- `TOTAL_BALANCE` - Net balance using explicit formula (see below)
 
 **Join To:**
 ```sql
@@ -1114,13 +1152,23 @@ WHERE EB.PERSON_ID = AED.PERSON_ID
 TOTAL_BALANCE = PY_CARRYOVER + CY_ACCRUAL + ADJUSTMENT - TAKEN_LEAVE - ENCASHMENT - CARRYOVER_EXPIRY
 ```
 
+**Why NOT `SUM(APACD.VALUE)` for TOTAL_BALANCE:**  
+`TAKEN_LEAVE` and `BOOKED_LEAVE` are wrapped in `ABS()` to display as positive numbers, so they are no longer negative. A raw `SUM(VALUE)` would double-count the sign correction. `TOTAL_BALANCE` must explicitly subtract the `ABS()` versions of debit components (`TAKEN_LEAVE`, `ENCASHMENT`, `CARRYOVER_EXPIRY`) to match the documented formula.
+
+**Anniversary Plan Period Logic:**  
+For anniversary plans (`PLAN_PERIOD_TYPE <> 'C'`), the period start is the employee's hire-date anniversary in the effective year — not January 1st. The CTE uses `PEA.HIRE_DATE` (sourced from `PLAN_ENROLLMENT_ACTIVE`) to reconstruct the correct anniversary date:
+- If the anniversary date in the effective year has already passed (≤ effective date) → use that date as the period start.
+- If the anniversary date in the effective year is still in the future (> effective date) → step back one year.
+
 **Key Features:**
 - Uses MATERIALIZE hint for optimization
 - Aggregates transaction details into summary components
 - Filters by plan period type (Calendar vs Anniversary)
+- Anniversary period start derived from employee hire date, not TRUNC(date, 'YYYY')
 - Handles taken leave vs booked leave separately
 - Excludes carryover from general adjustments
 - All components use NVL() to prevent NULL arithmetic
+- Requires `PLAN_ENROLLMENT_ACTIVE` (which must include `HIRE_DATE`) as prerequisite
 
 **Performance:**
 - Requires PLAN_ENROLLMENT_ACTIVE CTE as prerequisite
